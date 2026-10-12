@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-translator"
+version = "0.3.4"
+description = "Cross-platform live selection and screenshot translator"
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6-Essentials==6.10.3",
+  "Pillow>=11,<13",
+  "keyring>=25,<26",
+  "python-xlib>=0.33; sys_platform == 'linux'",
+  "uiautomation>=2.0.29,<3; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pyinstaller>=6.16,<7", "build>=1.2"]
+
+[project.scripts]
+paper-translator = "paper_translator.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+ [tool.setuptools]
+include-package-data = true

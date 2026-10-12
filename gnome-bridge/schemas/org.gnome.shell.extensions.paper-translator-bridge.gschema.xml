@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.paper-translator-bridge" path="/org/gnome/shell/extensions/paper-translator-bridge/">
+    <key name="paper-translator-screenshot" type="as"><default>['&lt;Control&gt;&lt;Alt&gt;s']</default><summary>Screenshot shortcut</summary></key>
+    <key name="paper-translator-toggle" type="as"><default>['&lt;Control&gt;&lt;Alt&gt;t']</default><summary>Translation toggle shortcut</summary></key>
+  </schema>
+</schemalist>
