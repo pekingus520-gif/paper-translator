@@ -105,8 +105,10 @@ class Translator:
                 result.translation = reviewed['translation']
                 result.ambiguities = reviewed.get('ambiguities', [])
                 result.reviewed = True
-            except (TranslationError, ValueError, KeyError, TypeError, IndexError):
-                raise TranslationError('论文复核未完成：未展示未经复核的初译，请检查 AI 配置或重试。') from None
+            except TranslationError as exc:
+                raise TranslationError(f'AI 复核失败：{exc}') from None
+            except (ValueError, KeyError, TypeError, IndexError):
+                raise TranslationError('论文复核未完成：AI 返回格式不符合要求，请检查模型输出或重试。') from None
         return result
 
     def _baidu(self, text, s):
@@ -154,10 +156,11 @@ class Translator:
         content = data['choices'][0]['message']['content']
         if not isinstance(content, str):
             raise ValueError('Missing content')
-        content = content.strip()
-        if content.startswith('```') and content.endswith('```'):
-            content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-        obj = json.loads(content)
+        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        start = content.find('{')
+        if start < 0:
+            raise ValueError('Missing JSON object')
+        obj, _ = json.JSONDecoder().raw_decode(content[start:])
         if not isinstance(obj, dict) or not isinstance(obj.get('translation'), str) or not obj['translation'].strip():
             raise ValueError('Missing translation')
         if not isinstance(obj.get('ambiguities', []), list):

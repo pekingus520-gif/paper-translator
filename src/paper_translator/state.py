@@ -21,7 +21,7 @@ class RequestGate:
 
 
 class SelectionDebouncer:
-    def __init__(self, delay_ms=450):
+    def __init__(self, delay_ms=1000):
         self.delay = delay_ms
         self.current = ''
         self.changed_at = 0
@@ -31,6 +31,10 @@ class SelectionDebouncer:
     def suspend(self):
         self.was_enabled = False
 
+    def cancel_current(self):
+        # A copy action consumes this selection; a new selection may translate.
+        self.emitted = self.current
+
     def feed(self, text, now_ms, dragging=False, enabled=True):
         text = (text or '').strip()
         if not enabled or not self.was_enabled:
@@ -39,6 +43,8 @@ class SelectionDebouncer:
             self.was_enabled = enabled
             return None
         if dragging:
+            # A fresh drag is a new user action even when it selects identical text.
+            self.emitted = ''
             self.current = ''
             self.changed_at = now_ms
             return None

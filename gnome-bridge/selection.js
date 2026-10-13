@@ -1,6 +1,6 @@
 // Pure selection state: imports no GNOME APIs so it can be tested outside Shell.
 export class SelectionTracker {
-    constructor(delay = 450) {
+    constructor(delay = 1000) {
         this.delay = delay;
         this.suspend();
     }
@@ -12,6 +12,10 @@ export class SelectionTracker {
         this.changedAt = 0;
     }
 
+    cancelCurrent() {
+        this.emitted = this.current;
+    }
+
     feed(text, now, dragging = false) {
         text = (text ?? '').trim();
         if (this.priming) {
@@ -21,6 +25,7 @@ export class SelectionTracker {
             return null;
         }
         if (dragging) {
+            this.emitted = '';
             this.current = '';
             this.changedAt = now;
             return null;

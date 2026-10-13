@@ -16,6 +16,7 @@ class X11Adapter(InputAdapter):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
         self.debouncer = SelectionDebouncer()
+        QApplication.clipboard().dataChanged.connect(self.debouncer.cancel_current)
         self.bindings = {}
 
     def configure(self, settings):

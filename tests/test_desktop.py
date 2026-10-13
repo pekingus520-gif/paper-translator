@@ -8,7 +8,7 @@ from PySide6.QtCore import QAbstractAnimation, QPoint, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtNetwork import QLocalSocket
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QFrame, QGroupBox, QLabel, QMenuBar, QPushButton, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGroupBox, QLabel, QMenuBar, QPushButton, QSystemTrayIcon
 
 from paper_translator.config import ConfigStore, Settings
 from paper_translator.controller import TranslationController
@@ -108,6 +108,9 @@ def test_ipc_accepts_one_bounded_command_and_rejects_bad_input(qapp, spin, tmp_p
     server.start()
     clients = []
     for payload in [b'{"command":"selection","text":"sentence"}\n',
+                    b'{"command":"screenshot_native","capture_id":"capture-one"}\n',
+                    b'{"command":"screenshot_file","capture_id":"capture-one","path":"/tmp/shot.png"}\n',
+                    b'{"command":"screenshot_file","capture_id":"capture-one","path":45}\n',
                     b'{"command":"unknown"}\n', b'{"command":"selection","text":45}\n',
                     b'x' * 70000 + b'\n']:
         s = QLocalSocket()
@@ -116,10 +119,12 @@ def test_ipc_accepts_one_bounded_command_and_rejects_bad_input(qapp, spin, tmp_p
         assert s.waitForConnected(1000)
         s.write(payload)
         s.flush()
-    spin(lambda: len(received) == 1)
+    spin(lambda: len(received) == 3)
     for _ in range(5):
         qapp.processEvents()
-    assert received == [{'command': 'selection', 'text': 'sentence'}]
+    assert received == [{'command': 'selection', 'text': 'sentence'},
+                        {'command': 'screenshot_native', 'capture_id': 'capture-one'},
+                        {'command': 'screenshot_file', 'capture_id': 'capture-one', 'path': '/tmp/shot.png'}]
     for s in clients:
         s.abort()
     server.close()
@@ -237,6 +242,26 @@ def test_main_window_is_minimal_and_ctrl_enter_translates(qapp):
     window.input.setFocus()
     QTest.keyClick(window.input, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert submitted == ['manual translation']
+    window.allow_quit = True
+    window.close()
+
+
+def test_application_icon_is_transparent_and_uses_project_asset():
+    from paper_translator.app import application_icon, application_icon_path
+    path = application_icon_path()
+    assert path.name == 'paper-translator-icon.png'
+    image = QImage(str(path))
+    assert not image.isNull()
+    assert image.hasAlphaChannel()
+    assert image.pixelColor(0, 0).alpha() == 0
+    assert not application_icon().isNull()
+
+
+def test_main_title_bar_shows_the_application_logo(qapp):
+    window = MainWindow()
+    logo = window.title_bar.logo
+    assert not logo.pixmap().isNull()
+    assert logo.width() >= 48
     window.allow_quit = True
     window.close()
 
@@ -360,6 +385,84 @@ def test_no_tray_keeps_the_frameless_canvas_and_close_quits(qapp, monkeypatch):
     assert desktop.window.allow_quit
     assert desktop.window.findChildren(QMenuBar) == []
     desktop.window.close()
+
+
+def test_wayland_screenshot_keeps_requesting_window_focused_and_restores_opacity(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from paper_translator.app import DesktopApplication
+    import paper_translator.app as app_module
+    scheduled = []
+    monkeypatch.setattr(app_module.QTimer, 'singleShot', lambda delay, callback: scheduled.append(callback))
+    desktop = DesktopApplication.__new__(DesktopApplication)
+    desktop.settings = Settings()
+    desktop.wayland = True
+    desktop.capture_lock = False
+    desktop.native_capture_id = None
+    desktop.native_capture_timer = SimpleNamespace(stop=lambda: None)
+    desktop.window = MainWindow()
+    desktop.window.show()
+    desktop.window.setWindowOpacity(.92)
+    desktop.result_window = SimpleNamespace(hide=lambda: None, source=SimpleNamespace(clear=lambda: None))
+    desktop.controller = SimpleNamespace(gate=SimpleNamespace(invalidate=lambda: None), pending=None)
+    desktop.capture = SimpleNamespace(start=lambda: None)
+    desktop.screenshot()
+    assert scheduled
+    assert not desktop.window.isMinimized()
+    assert desktop.window.windowOpacity() == 0
+    desktop._capture_cancel()
+    assert desktop.window.windowOpacity() == pytest.approx(.92, abs=1 / 255)
+    desktop.window.allow_quit = True
+    desktop.window.close()
+
+
+def test_native_gnome_screenshot_accepts_only_matching_capture(qapp, tmp_path):
+    from types import SimpleNamespace
+    from paper_translator.app import DesktopApplication
+    desktop = DesktopApplication.__new__(DesktopApplication)
+    desktop.settings = Settings()
+    desktop.wayland = True
+    desktop.capture_lock = False
+    desktop.capture_token = None
+    desktop.native_capture_id = None
+    desktop.native_capture_timer = SimpleNamespace(start=lambda _ms: None, stop=lambda: None)
+    desktop.window = MainWindow()
+    desktop.window.show()
+    desktop.result_window = SimpleNamespace(hide=lambda: None, source=SimpleNamespace(clear=lambda: None))
+    desktop.controller = SimpleNamespace(gate=SimpleNamespace(invalidate=lambda: None), pending=None,
+                                        submit_image=lambda image: image.width())
+    desktop.screenshot_native('capture-one')
+    assert desktop.capture_lock
+    desktop._native_cancel('stale')
+    assert desktop.capture_lock
+    path = tmp_path / 'capture.png'
+    image = QImage(50, 20, QImage.Format.Format_RGB32)
+    image.fill(QColor('white'))
+    assert image.save(str(path))
+    desktop._native_file('stale', str(path))
+    assert desktop.capture_token is None
+    desktop._native_file('capture-one', str(path))
+    assert desktop.capture_token == 50
+    assert desktop.native_capture_id is None
+    desktop.window.allow_quit = True
+    desktop.window.close()
+
+
+def test_native_gnome_screenshot_uses_clipboard_image_if_file_is_unavailable(qapp):
+    from types import SimpleNamespace
+    from paper_translator.app import DesktopApplication
+    desktop = DesktopApplication.__new__(DesktopApplication)
+    desktop.native_capture_id = 'capture-one'
+    desktop.capture_lock = True
+    desktop.settings = Settings()
+    desktop.native_capture_timer = SimpleNamespace(stop=lambda: None)
+    received = []
+    desktop.controller = SimpleNamespace(submit_image=lambda image: received.append(image.size()) or 1)
+    image = QImage(40, 30, QImage.Format.Format_RGB32)
+    image.fill(QColor('white'))
+    QApplication.clipboard().setImage(image)
+    desktop._native_clipboard_changed()
+    assert desktop.native_capture_id is None
+    assert received == [image.size()]
 
 
 def test_settings_dialog_previews_entire_window_opacity(qapp, tmp_path):

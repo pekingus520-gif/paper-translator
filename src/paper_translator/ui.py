@@ -1,4 +1,6 @@
 from dataclasses import replace
+from pathlib import Path
+import sys
 
 from PySide6.QtCore import (QEvent, QEasingCurve, QPoint, Property, QPropertyAnimation,
                            Qt, QVariantAnimation, Signal)
@@ -90,6 +92,13 @@ def result_palette(name):
                   'muted': '#94a3b8', 'border': '#334155'}
     values.update({key: base[key] for key in ('accent', 'accent_hover', 'button_text')})
     return values
+
+
+def application_asset_path(name):
+    root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[2]))
+    frozen = root / 'paper_translator' / 'assets' / name
+    source = Path(__file__).resolve().parent / 'assets' / name
+    return frozen if frozen.is_file() else source
 
 
 class SubmitTextEdit(QTextEdit):
@@ -286,16 +295,17 @@ class WindowTitleBar(QFrame):
         self._fallback_drag_ratio = 0.5
         self._fallback_drag_y = 0
         self.setObjectName('windowTitleBar')
-        self.setFixedHeight(44)
+        self.setFixedHeight(58)
         self.setStyleSheet('QFrame#windowTitleBar { background:transparent; border:0; }')
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.brand_mark = QLabel('●')
-        self.brand_mark.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.brand_mark.setStyleSheet('color:#818cf8; font-size:12px;')
-        layout.addWidget(self.brand_mark)
+        self.logo = QLabel()
+        self.logo.setObjectName('applicationLogo')
+        self.logo.setFixedSize(50, 50)
+        self.logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(self.logo)
         self.brand = QLabel('Paper Translator')
         self.brand.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.brand.setStyleSheet(
@@ -317,12 +327,28 @@ class WindowTitleBar(QFrame):
 
     def apply_theme(self, name):
         colors = theme_colors(name)
+        self._set_logo_color(colors['text'])
         self.brand.setStyleSheet(
             f"color:{colors['text']}; font-size:22px; font-weight:700; letter-spacing:0.4px;")
-        self.brand_mark.setStyleSheet(f"color:{colors['accent']}; font-size:12px;")
         self.settings_button.apply_theme(name)
         for button in (self.minimize_button, self.maximize_button, self.close_button):
             button.apply_theme(name)
+
+    def _set_logo_color(self, color):
+        source = QPixmap(str(application_asset_path('paper-translator-icon.png')))
+        if source.isNull():
+            self.logo.clear()
+            return
+        tinted = QPixmap(source.size())
+        tinted.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(tinted)
+        painter.drawPixmap(0, 0, source)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), QColor(color))
+        painter.end()
+        self.logo.setPixmap(tinted.scaled(
+            self.logo.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -878,8 +904,7 @@ class MainWindow(QMainWindow):
         self.wallpaper.set_theme_colors(colors, self.theme_name)
         self.title_bar.brand.setStyleSheet(
             f"color:{colors['text']}; font-size:22px; font-weight:700; letter-spacing:0.4px;")
-        self.title_bar.brand_mark.setStyleSheet(
-            f"color:{colors['accent']}; font-size:12px;")
+        self.title_bar._set_logo_color(colors['text'])
         self.card.setStyleSheet(f'''QFrame#translationCard {{ background:{colors['card']};
             border:1px solid {colors['card_border']}; border-radius:24px; }}''')
         self.input.setStyleSheet(f'''QTextEdit {{ color:{colors['text']};

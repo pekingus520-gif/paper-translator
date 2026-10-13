@@ -21,6 +21,8 @@ def selection_process(connection, parent_pid):
         user32 = ctypes.windll.user32
         user32.GetForegroundWindow.restype = wintypes.HWND
         user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+        clipboard_sequence = user32.GetClipboardSequenceNumber()
         enabled, generation = False, 0
         while True:
             while connection.poll():
@@ -54,6 +56,12 @@ def selection_process(connection, parent_pid):
                 except Exception:
                     text = ''
             selected = debouncer.feed(text, time.monotonic() * 1000, dragging=dragging, enabled=enabled)
+            current_sequence = user32.GetClipboardSequenceNumber()
+            if current_sequence != clipboard_sequence:
+                if debouncer.current and not dragging:
+                    debouncer.cancel_current()
+                    selected = None
+                clipboard_sequence = current_sequence
             if selected:
                 connection.send({'text': selected, 'generation': generation})
             time.sleep(0.15)

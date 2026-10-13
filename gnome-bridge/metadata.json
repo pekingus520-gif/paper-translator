@@ -4,5 +4,5 @@
   "description": "Only forwards primary selections and hotkeys to the independent Paper Translator desktop app. No API keys or translation UI.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "settings-schema": "org.gnome.shell.extensions.paper-translator-bridge",
-  "version": 1
+  "version": 3
 }

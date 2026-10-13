@@ -17,7 +17,13 @@ cp "$project_dir/gnome-bridge/schemas/"*.xml "$target_dir/schemas/"
 glib-compile-schemas --strict "$target_dir/schemas"
 echo "已安装辅助组件：$target_dir"
 if gnome-extensions enable "$uuid"; then
-  echo '已启用。请启动翻译软件，检查主窗口是否显示已连接。'
+  state="$(gnome-extensions info "$uuid" 2>/dev/null || true)"
+  target_version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*\([0-9]*\).*/\1/p' "$target_dir/metadata.json")"
+  if grep -q 'State: ACTIVE' <<< "$state" && grep -q "Version: $target_version" <<< "$state"; then
+    echo 'GNOME 取词组件已运行。'
+  else
+    echo '组件已启用，但本次 GNOME 会话尚未加载新版。请注销并重新登录 Ubuntu。'
+  fi
 else
   echo 'GNOME 尚未发现新组件：请注销并重新登录，然后运行：'
   echo "gnome-extensions enable $uuid"

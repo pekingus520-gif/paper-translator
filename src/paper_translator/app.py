@@ -16,6 +16,18 @@ from .zotero import ZoteroBridge
 from .ui import MainWindow, ResultWindow, SettingsDialog
 
 
+def application_icon_path():
+    root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[2]))
+    frozen = root / 'paper_translator' / 'assets' / 'paper-translator-icon.png'
+    source = Path(__file__).resolve().parent / 'assets' / 'paper-translator-icon.png'
+    return frozen if frozen.is_file() else source
+
+
+def application_icon():
+    path = application_icon_path()
+    return QIcon(str(path)) if path.is_file() else QIcon()
+
+
 class DesktopApplication:
     def __init__(self, app, store=None, native_inputs=True):
         self.app = app
@@ -29,6 +41,12 @@ class DesktopApplication:
         self._apply_opacity(self.settings.window_opacity)
         self.capture_lock = False
         self.capture_token = None
+        self._capture_window_opacity = None
+        self.native_capture_id = None
+        self.native_capture_timer = QTimer()
+        self.native_capture_timer.setSingleShot(True)
+        self.native_capture_timer.timeout.connect(self._native_capture_timeout)
+        QApplication.clipboard().dataChanged.connect(self._native_clipboard_changed)
         self.stopping = False
         self.server = LocalCommandServer()
         config_directory().mkdir(parents=True, exist_ok=True)
@@ -101,7 +119,9 @@ class DesktopApplication:
             # the close control exits instead of hiding an unreachable process.
             self.window.allow_quit = True
             return
-        icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
+        icon = self.app.windowIcon()
+        if icon.isNull():
+            icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
         self.tray = QSystemTrayIcon(icon)
         menu = QMenu()
         for label, callback in [('打开主窗口', self.show), ('截图翻译', self.screenshot),
@@ -136,6 +156,12 @@ class DesktopApplication:
             self.selection(message['text'])
         elif name == 'screenshot':
             self.screenshot()
+        elif name == 'screenshot_native':
+            self.screenshot_native(message.get('capture_id'))
+        elif name == 'screenshot_file':
+            self._native_file(message.get('capture_id'), message.get('path'))
+        elif name == 'screenshot_cancel':
+            self._native_cancel(message.get('capture_id'))
         elif name == 'toggle':
             self.toggle()
         elif name == 'show':
@@ -176,15 +202,84 @@ class DesktopApplication:
         self.capture_lock = True
         self.result_window.hide()
         self.result_window.source.clear()
-        self.window.showMinimized()
+        if self.wayland:
+            # The portal refuses permission dialogs from an unfocused app.
+            # Keep a transparent window focused while the shell chooses an area.
+            self._capture_window_opacity = self.window.windowOpacity()
+            self.window.setWindowOpacity(0.0)
+            self.window.showNormal()
+            self.window.raise_()
+            self.window.activateWindow()
+        else:
+            self.window.showMinimized()
         self.window.statusBar().showMessage('请选择截图区域，取消可按 Esc')
-        QTimer.singleShot(180, self._start_capture)
+        QTimer.singleShot(350 if self.wayland else 180, self._start_capture)
+
+    def screenshot_native(self, capture_id):
+        """GNOME Shell captures the region without a portal focus dialog."""
+        if not self.wayland or not self.settings.enabled or self.capture_lock or not capture_id:
+            return
+        self.controller.gate.invalidate()
+        self.controller.pending = None
+        self.capture_lock = True
+        self.capture_token = None
+        self.native_capture_id = capture_id
+        self.result_window.hide()
+        self.result_window.source.clear()
+        self.window.showMinimized()
+        self.native_capture_timer.start(60000)
+
+    def _native_file(self, capture_id, path):
+        if not self.native_capture_id or capture_id != self.native_capture_id or not path:
+            return
+        image = QImage(path)
+        if image.isNull():
+            self.native_capture_id = None
+            self.native_capture_timer.stop()
+            self._capture_error('GNOME 截图文件无法读取')
+            return
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
+        self._image(image)
+
+    def _native_clipboard_changed(self):
+        # GNOME also puts screenshots on the clipboard. This covers desktops
+        # where the saved screenshot path is unavailable to the Qt process.
+        if not self.native_capture_id:
+            return
+        image = QApplication.clipboard().image()
+        if image.isNull():
+            return
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
+        self._image(image)
+
+    def _native_cancel(self, capture_id):
+        if capture_id != self.native_capture_id:
+            return
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
+        self._capture_cancel()
+        self.window.showNormal()
+
+    def _native_capture_timeout(self):
+        if self.native_capture_id:
+            self.native_capture_id = None
+            self.capture_lock = False
+            self.capture_token = None
+            self.window.showNormal()
+
+    def _restore_capture_window(self):
+        if self._capture_window_opacity is not None:
+            self.window.setWindowOpacity(self._capture_window_opacity)
+            self._capture_window_opacity = None
 
     def _start_capture(self):
         if self.capture_lock and self.settings.enabled:
             self.capture.start()
 
     def _portal_image(self, path):
+        self._restore_capture_window()
         self._image(QImage(path))
 
     def _image(self, image):
@@ -200,11 +295,15 @@ class DesktopApplication:
             self.capture_token = None
 
     def _capture_cancel(self):
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
+        self._restore_capture_window()
         self.capture_lock = False
         self.capture_token = None
         self.window.statusBar().showMessage('截图已取消')
 
     def _capture_error(self, error):
+        self._restore_capture_window()
         self.capture_lock = False
         self.capture_token = None
         if self.settings.enabled:
@@ -216,6 +315,9 @@ class DesktopApplication:
             self.result_window.show_error(message)
 
     def toggle(self):
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
+        self._restore_capture_window()
         enabled = not self.settings.enabled
         self.controller.set_enabled(enabled)
         self.capture.cancel()
@@ -257,6 +359,8 @@ class DesktopApplication:
             QMessageBox.warning(self.window, '保存失败', str(exc))
             return
         self.capture.cancel()
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
         self.capture_lock = False
         self.capture_token = None
         self.result_window.hide()
@@ -276,6 +380,8 @@ class DesktopApplication:
         if self.stopping:
             return
         self.stopping = True
+        self.native_capture_id = None
+        self.native_capture_timer.stop()
         self.window.allow_quit = True
         self.controller.set_enabled(False)
         self.capture.cancel()
@@ -306,6 +412,7 @@ def main(argv=None):
     QApplication.setApplicationName('PaperTranslator')
     QApplication.setDesktopFileName('io.github.papertranslator.App')
     app = QApplication(sys.argv[:1])
+    app.setWindowIcon(application_icon())
     app.setQuitOnLastWindowClosed(False)
     command = {'command': 'toggle' if args.toggle else 'screenshot' if args.screenshot else 'show'}
     if send_command(socket_name(), command):

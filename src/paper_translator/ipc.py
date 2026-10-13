@@ -88,6 +88,14 @@ class LocalCommandServer(QObject):
             elif name == 'bridge':
                 if not isinstance(value.get('status', ''), str) or len(value.get('status', '')) > 1000:
                     raise ValueError()
+            elif name in ('screenshot_native', 'screenshot_file', 'screenshot_cancel'):
+                capture_id = value.get('capture_id')
+                if not isinstance(capture_id, str) or not 0 < len(capture_id) <= 100:
+                    raise ValueError()
+                if name == 'screenshot_file':
+                    path = value.get('path')
+                    if not isinstance(path, str) or not 0 < len(path) <= 4096:
+                        raise ValueError()
             elif name not in ('screenshot', 'toggle', 'show'):
                 raise ValueError()
             self.command.emit(value)

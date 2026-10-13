@@ -5,6 +5,10 @@ launcher="$project_dir/PaperTranslator"
 if [[ ! -x "$launcher" ]]; then
   launcher="$project_dir/scripts/run-linux.sh"
 fi
+icon="$project_dir/assets/paper-translator-icon.png"
+if [[ ! -f "$icon" ]]; then
+  icon="$project_dir/src/paper_translator/assets/paper-translator-icon.png"
+fi
 app_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$app_dir"
 escaped_launcher="${launcher//\\/\\\\}"
@@ -17,7 +21,7 @@ Type=Application
 Name=Paper Translator
 Comment=划词与截图翻译
 Exec="$escaped_launcher"
-Icon=accessories-dictionary
+Icon="$icon"
 Terminal=false
 Categories=Education;
 StartupWMClass=PaperTranslator

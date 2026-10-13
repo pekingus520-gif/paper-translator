@@ -107,6 +107,40 @@ def test_bad_review_fails_without_presenting_draft(api_server, payload):
         Translator().translate('term', settings)
 
 
+def test_paper_review_reports_ai_http_failure_without_leaking_response(api_server):
+    url, requests, replies = api_server
+    replies.extend([(200, {'trans_result': [{'dst': '初译'}]}),
+                    (401, {'message': 'private ai-secret'})])
+    settings = configured(url)
+    settings.mode = 'paper'
+    with pytest.raises(TranslationError, match='AI 复核失败：API HTTP 401') as exc:
+        Translator().translate('term', settings)
+    assert 'private' not in str(exc.value)
+    assert 'ai-secret' not in str(exc.value)
+    assert len(requests) == 2
+
+
+def test_paper_review_accepts_thinking_and_fenced_json(api_server):
+    url, requests, replies = api_server
+    content = '<think>核对术语</think>\n```json\n{"translation":"注意力机制","ambiguities":[]}\n```'
+    replies.extend([(200, {'trans_result': [{'dst': '初译'}]}),
+                    (200, {'choices': [{'message': {'content': content}}]})])
+    settings = configured(url)
+    settings.mode = 'paper'
+    result = Translator().translate('attention mechanism', settings)
+    assert result.reviewed and result.translation == '注意力机制'
+
+
+def test_paper_review_explains_invalid_model_output(api_server):
+    url, requests, replies = api_server
+    replies.extend([(200, {'trans_result': [{'dst': '初译'}]}),
+                    (200, {'choices': [{'message': {'content': '不是 JSON'}}]})])
+    settings = configured(url)
+    settings.mode = 'paper'
+    with pytest.raises(TranslationError, match='AI 返回格式'):
+        Translator().translate('term', settings)
+
+
 def test_baidu_errors_never_become_empty_success(api_server):
     url, requests, replies = api_server
     replies.append((200, {'error_code': '54003', 'error_msg': 'limit'}))
@@ -187,18 +221,45 @@ def test_disabled_selection_does_not_replay_on_resume():
     assert d.feed('old', 1000, enabled=True) is None
     assert d.feed('old', 2000, enabled=True) is None
     d.feed('new', 2100)
-    assert d.feed('new', 2550) == 'new'
+    assert d.feed('new', 3100) == 'new'
 
 
 def test_focus_return_primes_existing_selection_without_retranslating():
     d = SelectionDebouncer()
     d.feed('selected', 0)
-    assert d.feed('selected', 450) == 'selected'
+    assert d.feed('selected', 1000) == 'selected'
     d.suspend()
-    assert d.feed('selected', 1000) is None
+    assert d.feed('selected', 1100) is None
     assert d.feed('selected', 1500) is None
     d.feed('new selection', 1600)
-    assert d.feed('new selection', 2050) == 'new selection'
+    assert d.feed('new selection', 2600) == 'new selection'
+
+
+def test_copy_cancels_pending_selection_until_text_changes():
+    d = SelectionDebouncer()
+    d.feed('initial', 0)
+    d.feed('copy candidate', 100)
+    d.cancel_current()
+    assert d.feed('copy candidate', 1500) is None
+    d.feed('new selection', 1600)
+    assert d.feed('new selection', 2599) is None
+    assert d.feed('new selection', 2600) == 'new selection'
+
+
+def test_same_text_can_translate_after_a_new_drag_even_after_copy():
+    d = SelectionDebouncer()
+    d.feed('same', 0)
+    assert d.feed('same', 1000) == 'same'
+    d.feed('', 1100, dragging=True)
+    d.feed('same', 1200)
+    assert d.feed('same', 2200) == 'same'
+    d.feed('', 2300, dragging=True)
+    d.feed('same', 2400)
+    d.cancel_current()
+    assert d.feed('same', 3400) is None
+    d.feed('', 3500, dragging=True)
+    d.feed('same', 3600)
+    assert d.feed('same', 4600) == 'same'
 
 
 class MemoryKeyring:

@@ -1,5 +1,12 @@
 /* Zotero 7–9 bootstrapped plugin. No translation credentials or remote API calls. */
-let pluginID, active = false, sequence = 0, timer = null, lastSent = '', handler;
+let pluginID, active = false, sequence = 0, timer = null, lastSent = '', lastSentAt = 0, handler;
+let copyDocument = null, copyHandler = null;
+
+function stopCopyWatch() {
+    if (copyDocument && copyHandler)
+        copyDocument.removeEventListener?.('copy', copyHandler, true);
+    copyDocument = copyHandler = null;
+}
 
 function configPath() {
     const {classes, interfaces} = Components;
@@ -69,22 +76,36 @@ function selectionChanged(event) {
     if (!active || !text || text.length > 10000) return;
     const ticket = ++sequence;
     if (timer !== null) { clearTimeout(timer); timer = null; }
+    stopCopyWatch();
     const status = event.doc.createElement('div');
     status.textContent = 'Paper Translator：等待选区稳定…';
     event.append(status);
+    copyDocument = event.doc;
+    copyHandler = () => {
+        if (!active || ticket !== sequence) return;
+        sequence++;
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        status.textContent = 'Paper Translator：已复制，取消自动翻译';
+        stopCopyWatch();
+    };
+    copyDocument.addEventListener?.('copy', copyHandler, true);
     (async () => {
         let config;
         try { config = await readConfig(); }
         catch (error) {
-            status.textContent = 'Paper Translator：' + error.message; return;
+            status.textContent = 'Paper Translator：' + error.message;
+            stopCopyWatch(); return;
         }
         if (!active || ticket !== sequence) return;
-        if (!config.enabled) { status.textContent = 'Paper Translator：已暂停'; return; }
+        if (!config.enabled) { status.textContent = 'Paper Translator：已暂停'; stopCopyWatch(); return; }
         const position = JSON.stringify(event.params.annotation.position || {});
         const key = `${config.generation}:${event.reader.itemID}:${position}:${text}`;
-        if (key === lastSent) { status.textContent = 'Paper Translator：该选区已发送'; return; }
+        if (key === lastSent && Date.now() - lastSentAt < 1500) {
+            status.textContent = 'Paper Translator：该选区已发送'; stopCopyWatch(); return;
+        }
         timer = setTimeout(async () => {
             timer = null;
+            stopCopyWatch();
             if (!active || ticket !== sequence || !status.isConnected) return;
             try {
                 const context = config.mode === 'paper' ? await nearbyContext(event, text) : '';
@@ -100,24 +121,26 @@ function selectionChanged(event) {
                 });
                 if (active && ticket === sequence) {
                     lastSent = key;
+                    lastSentAt = Date.now();
                     status.textContent = context ? 'Paper Translator：已发送选区及附近上下文' : 'Paper Translator：已发送选区';
                 }
             } catch (_error) {
                 status.textContent = 'Paper Translator：未连接，请确认翻译器正在运行且未暂停';
             }
-        }, 450);
+        }, 1000);
     })();
 }
 
 async function startup(data) {
-    pluginID = data.id; active = true; sequence++; lastSent = '';
+    pluginID = data.id; active = true; sequence++; lastSent = ''; lastSentAt = 0;
     handler = selectionChanged;
     Zotero.Reader.registerEventListener('renderTextSelectionPopup', handler, pluginID);
 }
 
 function shutdown() {
-    active = false; sequence++; lastSent = '';
+    active = false; sequence++; lastSent = ''; lastSentAt = 0;
     if (timer !== null) { clearTimeout(timer); timer = null; }
+    stopCopyWatch();
     if (handler) Zotero.Reader.unregisterEventListener('renderTextSelectionPopup', handler);
     handler = null;
 }

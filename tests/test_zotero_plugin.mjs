@@ -15,7 +15,7 @@ const scope = {
     Components:{classes:{'@mozilla.org/process/environment;1':{getService:()=>({get:name=>environmentValues[name]||''})}},interfaces:{nsIEnvironment:{},nsIFile:{}}},
     PathUtils:{homeDir:'/home/test',join:(...parts)=>scope.Zotero.isWin?path.win32.join(...parts):path.posix.join(...parts)},
     Services:{dirsvc:{get:()=>({path:'/home/test'})}},
-    setTimeout:(fn)=>{const id=++timerID;timers.set(id,fn);return id;},clearTimeout:(id)=>timers.delete(id),console,
+    setTimeout:(fn,delay)=>{const id=++timerID;timers.set(id,{fn,delay});return id;},clearTimeout:(id)=>timers.delete(id),console,
 };
 vm.createContext(scope);
 vm.runInContext(fs.readFileSync(new URL('../zotero-plugin/bootstrap.js',import.meta.url),'utf8'),scope);
@@ -38,19 +38,31 @@ scope.Zotero.File.getContentsAsync = async()=>'null';
 await assert.rejects(scope.readConfig(), /连接信息无效/);
 scope.Zotero.File.getContentsAsync = readContents;
 await scope.startup({id:'paper-translator@local'});
-const event = text => ({reader:{itemID:1},params:{annotation:{text}},doc:{createElement:()=>({isConnected:true,textContent:''})},append:()=>{}});
+const event = text => {
+    const listeners = new Map();
+    const doc = {createElement:()=>({isConnected:true,textContent:''}),
+        addEventListener:(name,fn)=>listeners.set(name,fn),
+        removeEventListener:name=>listeners.delete(name),
+        dispatch:name=>listeners.get(name)?.()};
+    return {reader:{itemID:1},params:{annotation:{text}},doc,append:()=>{}};
+};
 const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
-const settle=async()=>{await flush();const pending=[...timers.values()];timers.clear();for(const fn of pending)await fn();await flush();};
+const settle=async()=>{await flush();const pending=[...timers.values()];timers.clear();for(const {fn} of pending)await fn();await flush();};
 listener(event('old')); listener(event('new'));await settle();
 assert.equal(calls.length,1);assert.equal(JSON.parse(calls[0].options.body).text,'new');
 assert.equal(calls[0].options.headers.Authorization,'Bearer secret-token');
 listener(event('new'));await settle();assert.equal(calls.length,1);
-listener(event('before pause'));await flush();config={...config,generation:'two',enabled:false};await settle();assert.equal(calls.length,1);
-config={...config,generation:'three',enabled:true};listener(event('resumed'));await settle();assert.equal(calls.length,2);
+vm.runInContext('lastSentAt = Date.now() - 2000', scope);
+listener(event('new'));await settle();assert.equal(calls.length,2);
+listener(event('before pause'));await flush();config={...config,generation:'two',enabled:false};await settle();assert.equal(calls.length,2);
+config={...config,generation:'three',enabled:true};listener(event('resumed'));await settle();assert.equal(calls.length,3);
 const otherPage = event('resumed');
 otherPage.params.annotation.position = {pageIndex:1,rects:[[1,2,3,4]]};
-listener(otherPage);await settle();assert.equal(calls.length,3);
-listener(event('disconnect'));await flush();scope.shutdown();await settle();assert.equal(calls.length,3);assert.equal(removed,listener);
+listener(otherPage);await settle();assert.equal(calls.length,4);
+const copied=event('copy candidate');listener(copied);await flush();
+assert.equal([...timers.values()][0].delay,1000);
+copied.doc.dispatch('copy');await settle();assert.equal(calls.length,4);
+listener(event('disconnect'));await flush();scope.shutdown();await settle();assert.equal(calls.length,4);assert.equal(removed,listener);
 // Context extraction never sends an unrelated page; selection is centered and bounded.
 assert.equal(scope.contextAround('unrelated text','selected'), '');
 const context=scope.contextAround('a'.repeat(5000)+' selected '+'b'.repeat(5000),'selected');

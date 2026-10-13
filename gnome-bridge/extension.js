@@ -22,6 +22,13 @@ export default class PaperTranslatorBridge extends Extension {
         this._tracker = new SelectionTracker();
         this._settings = this.getSettings();
         this._clipboard = St.Clipboard.get_default();
+        this._copySignal = global.stage.connect('captured-event', (_stage, event) => {
+            if (event.type() === Clutter.EventType.KEY_PRESS &&
+                event.get_state() & Clutter.ModifierType.CONTROL_MASK &&
+                [Clutter.KEY_c, Clutter.KEY_C, Clutter.KEY_Insert].includes(event.get_key_symbol()))
+                this._tracker.cancelCurrent();
+            return Clutter.EVENT_PROPAGATE;
+        });
         this._file = Gio.File.new_for_path(GLib.build_filenamev([GLib.get_user_config_dir(), 'paper-translator', 'bridge.json']));
         this._readConfig();
         this._configTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
@@ -69,7 +76,9 @@ export default class PaperTranslatorBridge extends Extension {
                     this._settings.set_strv(key, [accelerator]);
                     const action = Main.wm.addKeybinding(key, this._settings, Meta.KeyBindingFlags.NONE,
                         Shell.ActionMode.NORMAL, () => {
-                            if (command === 'toggle' || this._config?.translation_enabled)
+                            if (command === 'screenshot' && this._config?.translation_enabled)
+                                this._startNativeScreenshot();
+                            else if (command === 'toggle')
                                 this._send({command});
                         });
                     if (action === Meta.KeyBindingAction.NONE)
@@ -127,7 +136,7 @@ export default class PaperTranslatorBridge extends Extension {
         });
     }
 
-    _send(message) {
+    _send(message, onSent = null) {
         if (!this._alive || !this._config)
             return;
         const address = new Gio.UnixSocketAddress({path: this._config.socket});
@@ -150,6 +159,7 @@ export default class PaperTranslatorBridge extends Extension {
                 stream.write_all_async(data, GLib.PRIORITY_DEFAULT, this._cancellable, (_stream, written) => {
                     try {
                         stream.write_all_finish(written);
+                        onSent?.();
                     } catch (_error) {
                         // App may have exited between connecting and writing.
                     } finally {
@@ -162,6 +172,88 @@ export default class PaperTranslatorBridge extends Extension {
                 }
             }
         });
+    }
+
+    _startNativeScreenshot() {
+        const ui = Main.screenshotUI;
+        if (!ui?.open) {
+            this._focusTranslator();
+            this._send({command: 'screenshot'});
+            return;
+        }
+        const captureId = GLib.uuid_string_random();
+        this._send({command: 'screenshot_native', capture_id: captureId}, () => {
+            if (!this._alive)
+                return;
+            let taken = false;
+            let dragStart = null;
+            let submitting = false;
+            const selector = ui._areaSelector;
+            const dragStartSignal = selector?.connect('drag-started', () => {
+                const [x, y] = global.get_pointer();
+                dragStart = {x, y};
+            });
+            const dragEndSignal = selector?.connect('drag-ended', () => {
+                if (!dragStart || submitting || !ui.visible || !ui._selectionButton?.checked)
+                    return;
+                const [x, y] = global.get_pointer();
+                const [,, width, height] = selector.getGeometry();
+                const moved = Math.hypot(x - dragStart.x, y - dragStart.y);
+                dragStart = null;
+                if (moved < 8 || width < 12 || height < 12)
+                    return;
+                submitting = true;
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    ui._onCaptureButtonClicked?.();
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+            const disconnectSignals = () => {
+                ui.disconnect(takenSignal);
+                ui.disconnect(closedSignal);
+                if (selector && dragStartSignal)
+                    selector.disconnect(dragStartSignal);
+                if (selector && dragEndSignal)
+                    selector.disconnect(dragEndSignal);
+            };
+            const takenSignal = ui.connect('screenshot-taken', (_ui, file) => {
+                taken = true;
+                this._send({command: 'screenshot_file', capture_id: captureId,
+                    path: file.get_path()});
+            });
+            const closedSignal = ui.connect('closed', () => {
+                disconnectSignals();
+                if (!taken)
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+                        this._send({command: 'screenshot_cancel', capture_id: captureId});
+                        return GLib.SOURCE_REMOVE;
+                    });
+            });
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 180, () => {
+                if (!this._alive) {
+                    disconnectSignals();
+                    return GLib.SOURCE_REMOVE;
+                }
+                ui.open().then(() => {
+                    // Start in area mode regardless of the user's last GNOME
+                    // screenshot mode; only the selected region is translated.
+                    if (ui._selectionButton)
+                        ui._selectionButton.checked = true;
+                }).catch(_error => {
+                    disconnectSignals();
+                    this._send({command: 'screenshot_cancel', capture_id: captureId});
+                });
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+    }
+
+    _focusTranslator() {
+        const window = global.get_window_actors()
+            .map(actor => actor.meta_window)
+            .find(candidate => candidate?.get_title() === 'Paper Translator');
+        if (window)
+            Main.activateWindow(window);
     }
 
     _positionResult(window) {
@@ -190,6 +282,8 @@ export default class PaperTranslatorBridge extends Extension {
         }
         if (this._mapSignal)
             global.window_manager.disconnect(this._mapSignal);
+        if (this._copySignal)
+            global.stage.disconnect(this._copySignal);
         this._unbind();
         this._config = null;
         this._clipboard = null;

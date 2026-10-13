@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Paper Translator Reader Bridge",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "description": "将 Zotero 阅读器选区及有限上下文传给本机 Paper Translator。",
   "author": "Paper Translator",
   "applications": {
