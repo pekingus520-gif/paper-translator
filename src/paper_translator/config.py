@@ -42,6 +42,7 @@ class Settings:
     mode: str = 'daily'
     enabled: bool = True
     selection_enabled: bool = True
+    main_window_on_top: bool = False
     screenshot_hotkey: str = 'Ctrl+Alt+S'
     toggle_hotkey: str = 'Ctrl+Alt+T'
     baidu_app_id: str = ''
@@ -65,7 +66,7 @@ class Settings:
     def validate(self):
         if self.mode not in ('daily', 'paper'):
             raise ValueError('模式必须是日常或论文')
-        for name in ('enabled', 'selection_enabled', 'auto_direction'):
+        for name in ('enabled', 'selection_enabled', 'main_window_on_top', 'auto_direction'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError('开关设置格式错误')
         self.screenshot_hotkey = canonical_hotkey(self.screenshot_hotkey)

@@ -21,40 +21,80 @@ class RequestGate:
 
 
 class SelectionDebouncer:
-    def __init__(self, delay_ms=1000):
+    def __init__(self, delay_ms=1000, minimum_drag=8):
         self.delay = delay_ms
+        self.minimum_drag_squared = minimum_drag * minimum_drag
         self.current = ''
-        self.changed_at = 0
-        self.emitted = ''
+        self.drag = None
+        self.awaiting_until = 0
+        self.pending = ''
+        self.pending_since = 0
+        self.copied = ''
+        self.copy_blocked = False
+        self.priming = True
         self.was_enabled = True
 
     def suspend(self):
-        self.was_enabled = False
+        self.priming = True
+        self.drag = None
+        self.pending = ''
+        self.awaiting_until = 0
 
     def cancel_current(self):
-        # A copy action consumes this selection; a new selection may translate.
-        self.emitted = self.current
+        self.copy_blocked = True
+        self.copied = self.pending or self.current
+        self.pending = ''
+        self.awaiting_until = 0
 
-    def feed(self, text, now_ms, dragging=False, enabled=True):
+    def feed(self, text, now_ms, dragging=False, enabled=True, point=None):
         text = (text or '').strip()
-        if not enabled or not self.was_enabled:
-            self.current = self.emitted = text
-            self.changed_at = now_ms
-            self.was_enabled = enabled
+        if not enabled:
+            self.current = text
+            self.suspend()
+            self.copied = ''
+            return None
+        if self.priming and not dragging:
+            self.current = text
+            self.priming = False
             return None
         if dragging:
-            # A fresh drag is a new user action even when it selects identical text.
-            self.emitted = ''
-            self.current = ''
-            self.changed_at = now_ms
+            if self.drag is None:
+                self.drag = {'baseline': self.current, 'start': point, 'moved': False}
+                self.copy_blocked = False
+                self.pending = ''
+                self.awaiting_until = 0
+            elif point is not None and self.drag['start'] is not None:
+                dx = point[0] - self.drag['start'][0]
+                dy = point[1] - self.drag['start'][1]
+                if dx * dx + dy * dy >= self.minimum_drag_squared:
+                    self.drag['moved'] = True
+            return None
+        if self.drag is not None:
+            gesture = self.drag
+            self.drag = None
+            self.awaiting_until = now_ms + 500 if gesture['moved'] and not self.copy_blocked else 0
+            self.pending = ''
+            if text and text != gesture['baseline'] and text != self.copied and gesture['moved'] and not self.copy_blocked:
+                self.pending = text
+                self.pending_since = now_ms
+                self.awaiting_until = 0
+                self.copied = ''
+            self.current = text
             return None
         if text != self.current:
+            if self.awaiting_until and now_ms <= self.awaiting_until and text and text != self.copied and not self.copy_blocked:
+                self.pending = text
+                self.pending_since = now_ms
+                self.copied = ''
+            else:
+                self.pending = ''
             self.current = text
-            self.changed_at = now_ms
-            if not text:
-                self.emitted = ''
+            self.awaiting_until = 0
             return None
-        if text and text != self.emitted and now_ms - self.changed_at >= self.delay:
-            self.emitted = text
-            return text
+        if self.awaiting_until and now_ms > self.awaiting_until:
+            self.awaiting_until = 0
+        if self.pending and text == self.pending and now_ms - self.pending_since >= self.delay:
+            selected = self.pending
+            self.pending = ''
+            return selected
         return None

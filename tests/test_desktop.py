@@ -8,14 +8,14 @@ from PySide6.QtCore import QAbstractAnimation, QPoint, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtNetwork import QLocalSocket
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGroupBox, QLabel, QMenuBar, QPushButton, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QFrame, QGroupBox, QLabel, QMenuBar, QPushButton, QSplitter, QSystemTrayIcon
 
 from paper_translator.config import ConfigStore, Settings
 from paper_translator.controller import TranslationController
 from paper_translator.providers import TranslationResult
 from paper_translator.ocr import OCR, OCRError
 from paper_translator.ipc import LocalCommandServer
-from paper_translator.ui import MainWindow, SettingsDialog, ResultWindow
+from paper_translator.ui import MainWindow, SettingsDialog, ResultWindow, StatusToast, THEMES, blend_palette, result_palette, theme_colors
 from paper_translator.capture import RegionOverlay, PortalCapture
 
 
@@ -246,6 +246,42 @@ def test_main_window_is_minimal_and_ctrl_enter_translates(qapp):
     window.close()
 
 
+def test_translation_switch_toast_updates_immediately_and_resets_timeout(qapp):
+    toast = StatusToast()
+    assert toast.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    assert toast.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    toast.show_state(True, 'dark')
+    assert toast.isVisible()
+    assert toast.message.text() == '翻译已开启'
+    assert toast.dismiss_timer.isActive()
+    toast.show_state(False, 'light')
+    assert toast.message.text() == '翻译已暂停'
+    assert toast.dismiss_timer.remainingTime() > 1500
+    toast.dismiss_timer.stop()
+    toast.hide()
+
+
+def test_toggle_updates_toast_with_new_state(qapp):
+    from types import SimpleNamespace
+    from paper_translator.app import DesktopApplication
+    desktop = DesktopApplication.__new__(DesktopApplication)
+    desktop.settings = Settings(enabled=True)
+    desktop.native_capture_id = None
+    desktop.native_capture_timer = SimpleNamespace(stop=lambda: None)
+    desktop._restore_capture_window = lambda: None
+    desktop.controller = SimpleNamespace(set_enabled=lambda enabled: setattr(desktop.settings, 'enabled', enabled))
+    desktop.capture = SimpleNamespace(cancel=lambda: None)
+    desktop.window = SimpleNamespace(refresh=lambda settings: None)
+    desktop.adapter = None
+    desktop.zotero = None
+    desktop._save_preferences = lambda: None
+    states = []
+    desktop.status_toast = SimpleNamespace(show_state=lambda *args: states.append(args))
+    desktop.toggle()
+    desktop.toggle()
+    assert [state[0] for state in states] == [False, True]
+
+
 def test_application_icon_is_transparent_and_uses_project_asset():
     from paper_translator.app import application_icon, application_icon_path
     path = application_icon_path()
@@ -255,6 +291,14 @@ def test_application_icon_is_transparent_and_uses_project_asset():
     assert image.hasAlphaChannel()
     assert image.pixelColor(0, 0).alpha() == 0
     assert not application_icon().isNull()
+
+
+def test_shortcut_icon_preserves_supplied_dark_background():
+    from paper_translator.ui import application_asset_path
+    image = QImage(str(application_asset_path('paper-translator-shortcut.png')))
+    assert not image.isNull()
+    assert image.pixelColor(0, 0).red() < 100
+    assert image.pixelColor(image.width() // 2, image.height() // 5).red() > 200
 
 
 def test_main_title_bar_shows_the_application_logo(qapp):
@@ -293,6 +337,13 @@ def test_main_window_replaces_the_system_title_bar(qapp):
     assert window.findChild(QPushButton, 'minimizeButton') is not None
     assert window.findChild(QPushButton, 'maximizeButton') is not None
     assert window.findChild(QPushButton, 'closeButton') is not None
+    pin = window.findChild(QPushButton, 'pinButton')
+    assert pin is not None
+    pin.click()
+    assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    assert pin.isChecked()
+    pin.click()
+    assert not window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
 
     window.findChild(QPushButton, 'maximizeButton').click()
     qapp.processEvents()
@@ -498,7 +549,7 @@ def test_dark_and_light_themes_animate_across_all_windows(qapp, spin):
     assert dialog.wallpaper_preview.theme_name == 'light'
     assert dialog.theme_transition.state() == QAbstractAnimation.State.Running
     spin(lambda: dialog.theme_transition.state() == QAbstractAnimation.State.Stopped)
-    assert '#4f46e5' in dialog.styleSheet()
+    assert THEMES['light']['accent'] in dialog.styleSheet()
     settings = dialog.values()
     assert settings.color_theme == 'light'
 
@@ -518,12 +569,100 @@ def test_dark_and_light_themes_animate_across_all_windows(qapp, spin):
     assert result.theme_name == 'light'
     assert result.theme_transition.state() == QAbstractAnimation.State.Running
     spin(lambda: result.theme_transition.state() == QAbstractAnimation.State.Stopped)
-    assert '#4f46e5' in result.styleSheet()
+    assert THEMES['light']['accent'] in result.styleSheet()
+
+    assert int(THEMES['light']['card'].split(',')[-1][:-1]) < 170
+    assert int(THEMES['light']['input'].split(',')[-1][:-1]) < 125
+    assert int(THEMES['light']['input_focus'].split(',')[-1][:-1]) < 160
+    assert '#4f46e5' not in dialog.styleSheet()
 
     dialog.close()
     main.allow_quit = True
     main.close()
     result.close()
+
+
+def test_settings_action_buttons_have_text_only_and_muted_blue_theme(qapp):
+    dialog = SettingsDialog(Settings(color_theme='light'))
+    buttons = dialog.findChild(QDialogButtonBox)
+    assert buttons is not None
+    for standard, label in ((QDialogButtonBox.StandardButton.Save, '保存'),
+                            (QDialogButtonBox.StandardButton.Cancel, '取消')):
+        button = buttons.button(standard)
+        assert button.text() == label
+        assert button.icon().isNull()
+    assert THEMES['light']['accent'] in dialog.styleSheet()
+    dialog.close()
+
+
+def test_theme_transition_preserves_translucency_between_palettes():
+    halfway = blend_palette(THEMES['dark'], THEMES['light'], .5)
+    assert halfway['card'] == 'rgba(134,138,146,175)'
+    assert halfway['input'].endswith(',51)')
+
+
+def test_wallpaper_color_updates_buttons_and_result_window(qapp, tmp_path):
+    wallpaper = tmp_path / 'red.png'
+    image = QImage(80, 80, QImage.Format.Format_RGB32)
+    image.fill(QColor('#ba5449'))
+    assert image.save(str(wallpaper))
+    extracted = QColor(theme_colors('light', str(wallpaper))['accent'])
+    assert extracted.red() > extracted.blue() + 25
+    main = MainWindow()
+    result = ResultWindow()
+    main.refresh(Settings(color_theme='light', wallpaper_path=str(wallpaper)))
+    result.set_wallpaper(str(wallpaper))
+    result.apply_theme('light', animated=False)
+    assert extracted.name() in main.input.styleSheet()
+    assert extracted.name() in result.styleSheet()
+    assert result._result_colors['background'] != result_palette('light')['background']
+    main.allow_quit = True
+    main.close()
+    result.close()
+
+
+def test_wallpaper_preview_recolors_settings_buttons_and_can_reset(qapp, tmp_path):
+    wallpaper = tmp_path / 'green.png'
+    image = QImage(40, 40, QImage.Format.Format_RGB32)
+    image.fill(QColor('#4a976e'))
+    assert image.save(str(wallpaper))
+    dialog = SettingsDialog(Settings(color_theme='light'))
+    previews = []
+    dialog.wallpaper_changed.connect(previews.append)
+    dialog.wallpaper_path.setText(str(wallpaper))
+    accent = theme_colors('light', str(wallpaper))['accent']
+    assert accent in dialog.styleSheet()
+    assert previews == [str(wallpaper)]
+    dialog.wallpaper_path.clear()
+    assert THEMES['light']['accent'] in dialog.styleSheet()
+    dialog.close()
+
+
+def test_cancelled_wallpaper_preview_restores_both_windows(qapp, tmp_path, monkeypatch):
+    from paper_translator.app import DesktopApplication
+    wallpaper = tmp_path / 'orange.png'
+    image = QImage(24, 24, QImage.Format.Format_RGB32)
+    image.fill(QColor('#c36b3d'))
+    assert image.save(str(wallpaper))
+    desktop = DesktopApplication.__new__(DesktopApplication)
+    desktop.settings = Settings(color_theme='light')
+    desktop.window = MainWindow()
+    desktop.result_window = ResultWindow()
+
+    def preview_then_cancel(dialog):
+        dialog.wallpaper_path.setText(str(wallpaper))
+        assert desktop.window.wallpaper_path == str(wallpaper)
+        assert desktop.result_window.wallpaper_path == str(wallpaper)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(SettingsDialog, 'exec', preview_then_cancel)
+    desktop.show_settings()
+    assert desktop.window.wallpaper_path == ''
+    assert desktop.result_window.wallpaper_path == ''
+    assert desktop.window._main_colors['accent'] == THEMES['light']['accent']
+    desktop.window.allow_quit = True
+    desktop.window.close()
+    desktop.result_window.close()
 
 
 def test_cancelled_theme_preview_restores_application_theme(qapp, monkeypatch):
@@ -600,6 +739,166 @@ def test_result_window_preserves_source_and_displays_review_warning(qapp):
     assert '初译' in window.output.toPlainText()
     assert '复核失败' in window.output.toPlainText()
     window.close()
+
+
+def test_result_stays_visible_until_closed_and_updates_on_next_translation(qapp):
+    window = ResultWindow()
+    window.display(TranslationResult('first', '第一句'))
+    assert window.isVisible()
+    assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    window.prepare('second')
+    assert window.isVisible()
+    assert window.output.toPlainText() == '第一句'
+    window.display(TranslationResult('second', '第二句'))
+    assert window.isVisible()
+    assert window.output.toPlainText() == '第二句'
+    window.close()
+    assert not window.isVisible()
+    window.display(TranslationResult('third', '第三句'))
+    assert window.isVisible()
+    window.close()
+
+
+def test_result_hover_highlights_corresponding_sentences_in_both_texts(qapp):
+    window = ResultWindow()
+    window.display(TranslationResult('First sentence. Second sentence.', '第一句。第二句。',
+                                     sentence_pairs=[(0, 15, 0, 4), (16, 32, 4, 8)]))
+    try:
+        cursor = window.source.textCursor()
+        cursor.setPosition(window.source.toPlainText().index('Second'))
+        QTest.mouseMove(window.source.viewport(), window.source.cursorRect(cursor).center())
+        qapp.processEvents()
+        source_ranges = [(item.cursor.selectionStart(), item.cursor.selectionEnd())
+                         for item in window.source.extraSelections()]
+        output_ranges = [(item.cursor.selectionStart(), item.cursor.selectionEnd())
+                         for item in window.output.extraSelections()]
+        assert source_ranges == [(16, 32)]
+        assert output_ranges == [(4, 8)]
+        window.prepare('New text')
+        assert window.isVisible()
+        assert window.source.toPlainText() == 'First sentence. Second sentence.'
+        assert [(item.cursor.selectionStart(), item.cursor.selectionEnd())
+                for item in window.source.extraSelections()] == [(16, 32)]
+        window.display(TranslationResult('New text', '新译文'))
+        assert window.source.toPlainText() == 'New text'
+        assert not window.source.extraSelections()
+        assert not window.output.extraSelections()
+    finally:
+        window.close()
+
+
+def test_result_hover_from_translation_ignores_warning_and_maps_by_order(qapp):
+    window = ResultWindow()
+    window.display(TranslationResult('A. B.', '甲。乙。', warning='注意。',
+                                     sentence_pairs=[(0, 2, 0, 2), (3, 5, 2, 4)]))
+    try:
+        cursor = window.output.textCursor()
+        cursor.setPosition(window.output.toPlainText().index('乙'))
+        QTest.mouseMove(window.output.viewport(), window.output.cursorRect(cursor).center())
+        qapp.processEvents()
+        source_selection = window.source.extraSelections()
+        output_selection = window.output.extraSelections()
+        assert source_selection[0].cursor.selectedText().strip() == 'B.'
+        assert output_selection[0].cursor.selectedText().strip() == '乙。'
+        previous = output_selection[0].cursor.selectionStart()
+        warning_cursor = window.output.textCursor()
+        warning_cursor.setPosition(window.output.toPlainText().index('注意'))
+        QTest.mouseMove(window.output.viewport(), window.output.cursorRect(warning_cursor).center())
+        qapp.processEvents()
+        assert window.output.extraSelections()[0].cursor.selectionStart() == previous
+    finally:
+        window.close()
+
+
+def test_result_hover_uses_translation_pairs_for_one_to_many_sentences(qapp):
+    window = ResultWindow()
+    result = TranslationResult('First sentence. Second sentence.', '第一句。另一种说法。\n第二句。',
+                               sentence_pairs=[(0, 15, 0, 10), (16, 32, 11, 15)])
+    window.display(result)
+    try:
+        cursor = window.output.textCursor()
+        cursor.setPosition(window.output.toPlainText().index('另一种'))
+        QTest.mouseMove(window.output.viewport(), window.output.cursorRect(cursor).center())
+        qapp.processEvents()
+        source = window.source.extraSelections()
+        output = window.output.extraSelections()
+        assert source[0].cursor.selectedText() == 'First sentence.'
+        assert output[0].cursor.selectedText() == '第一句。另一种说法。'
+    finally:
+        window.close()
+
+
+def test_result_hover_does_not_guess_pairs_when_counts_differ(qapp):
+    window = ResultWindow()
+    window.display(TranslationResult('First. Second.', '第一句。另一句。第二句。'))
+    try:
+        cursor = window.source.textCursor()
+        cursor.setPosition(window.source.toPlainText().index('Second'))
+        QTest.mouseMove(window.source.viewport(), window.source.cursorRect(cursor).center())
+        qapp.processEvents()
+        assert window.source.extraSelections()
+        assert not window.output.extraSelections()
+    finally:
+        window.close()
+
+
+def test_result_hover_scrolls_only_matched_other_text_into_view(qapp):
+    source_parts = [f'Sentence {index}.' for index in range(24)]
+    output_parts = [f'译文第{index}句。' for index in range(24)]
+    source = '\n'.join(source_parts)
+    output = '\n'.join(output_parts)
+    pairs = []
+    source_offset = output_offset = 0
+    for source_part, output_part in zip(source_parts, output_parts):
+        pairs.append((source_offset, source_offset + len(source_part),
+                      output_offset, output_offset + len(output_part)))
+        source_offset += len(source_part) + 1
+        output_offset += len(output_part) + 1
+    window = ResultWindow()
+    window.display(TranslationResult(source, output, sentence_pairs=pairs))
+    try:
+        window.source.verticalScrollBar().setValue(window.source.verticalScrollBar().maximum())
+        window.output.verticalScrollBar().setValue(0)
+        qapp.processEvents()
+        cursor = window.source.textCursor()
+        cursor.setPosition(pairs[-1][0])
+        QTest.mouseMove(window.source.viewport(), window.source.cursorRect(cursor).center())
+        qapp.processEvents()
+        assert window.output.verticalScrollBar().value() > 0
+        counterpart = window.output.textCursor()
+        counterpart.setPosition(pairs[-1][2])
+        rect = window.output.cursorRect(counterpart)
+        assert 0 <= rect.center().y() < window.output.viewport().height()
+        assert window.source.verticalScrollBar().value() == window.source.verticalScrollBar().maximum()
+        window.source.verticalScrollBar().setValue(0)
+        window.output.verticalScrollBar().setValue(window.output.verticalScrollBar().maximum())
+        qapp.processEvents()
+        translated_cursor = window.output.textCursor()
+        translated_cursor.setPosition(pairs[-1][2])
+        QTest.mouseMove(window.output.viewport(), window.output.cursorRect(translated_cursor).center())
+        qapp.processEvents()
+        assert window.source.verticalScrollBar().value() > 0
+    finally:
+        window.close()
+
+
+def test_result_text_boxes_can_be_resized_by_dragging_divider(qapp):
+    window = ResultWindow()
+    window.display(TranslationResult('Original.', '译文。'))
+    try:
+        assert isinstance(window.text_splitter, QSplitter)
+        before = window.text_splitter.sizes()
+        handle = window.text_splitter.handle(1)
+        center = handle.rect().center()
+        QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=center)
+        QTest.mouseMove(handle, center + QPoint(0, 45))
+        QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=center + QPoint(0, 45))
+        qapp.processEvents()
+        after = window.text_splitter.sizes()
+        assert after[0] > before[0]
+        assert after[1] < before[1]
+    finally:
+        window.close()
 
 
 def test_region_overlay_crops_and_cancel_emits_no_image(qapp):

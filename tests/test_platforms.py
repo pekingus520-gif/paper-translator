@@ -22,12 +22,17 @@ def test_wayland_publishes_only_non_secret_bridge_settings(qapp, tmp_path):
     assert value['enabled'] is False
     assert value['screenshot'] == '<Control><Alt>s'
     assert value['toggle'] == '<Control><Alt>t'
+    assert value['pin_main'] is False
     assert value['socket'] == '/tmp/test.sock'
     assert 'secret' not in json.dumps(value)
     before = value['generation']
-    adapter.configure(Settings(enabled=True))
+    adapter.configure(Settings(enabled=True, main_window_on_top=True, screenshot_hotkey='Alt+B',
+                               toggle_hotkey='Ctrl+Alt+Z'))
     resumed = json.loads((tmp_path / 'bridge.json').read_text())
     assert resumed['generation'] != before
+    assert resumed['screenshot'] == '<Alt>b'
+    assert resumed['toggle'] == '<Control><Alt>z'
+    assert resumed['pin_main'] is True
     adapter.stop()
     assert json.loads((tmp_path / 'bridge.json').read_text())['running'] is False
 

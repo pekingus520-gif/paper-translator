@@ -8,20 +8,47 @@ import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {SelectionTracker} from './selection.js';
+import {HotkeyBindings} from './bindings.js';
+import {attachScreenshotSignals} from './screenshot-session.js';
 
 export default class PaperTranslatorBridge extends Extension {
     enable() {
         this._alive = true;
         this._config = null;
-        this._signature = '';
-        this._bound = [];
         this._status = '';
+        this._mainPinned = null;
         this._polling = false;
         this._epoch = 0;
         this._cancellable = new Gio.Cancellable();
         this._tracker = new SelectionTracker();
         this._settings = this.getSettings();
+        this._hotkeys = new HotkeyBindings(
+            (key, accelerator) => {
+                this._settings.set_strv(key, [accelerator]);
+                const action = Main.wm.addKeybinding(key, this._settings, Meta.KeyBindingFlags.NONE,
+                    Shell.ActionMode.NORMAL, () => {
+                        if (key === 'paper-translator-screenshot' && this._config?.translation_enabled)
+                            this._startNativeScreenshot();
+                        else if (key === 'paper-translator-toggle')
+                            this._send({command: 'toggle'});
+                    });
+                return action !== Meta.KeyBindingAction.NONE;
+            },
+            key => Main.wm.removeKeybinding(key),
+        );
         this._clipboard = St.Clipboard.get_default();
+        try {
+            this._selection = global.display.get_selection();
+            this._ownerSignal = this._selection.connect('owner-changed', (_selection, type) => {
+                if (type === Meta.SelectionType?.SELECTION_CLIPBOARD)
+                    this._tracker.cancelCurrent();
+            });
+        } catch (_error) {
+            // Text changes and Ctrl+C remain available on older Shell versions.
+            this._selection = null;
+            this._ownerSignal = null;
+        }
+        this._lastClipboardText = undefined;
         this._copySignal = global.stage.connect('captured-event', (_stage, event) => {
             if (event.type() === Clutter.EventType.KEY_PRESS &&
                 event.get_state() & Clutter.ModifierType.CONTROL_MASK &&
@@ -35,7 +62,7 @@ export default class PaperTranslatorBridge extends Extension {
             this._readConfig();
             return GLib.SOURCE_CONTINUE;
         });
-        this._selectionTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+        this._selectionTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60, () => {
             this._pollSelection();
             return GLib.SOURCE_CONTINUE;
         });
@@ -43,7 +70,11 @@ export default class PaperTranslatorBridge extends Extension {
             this._send({command: 'bridge', status: this._status});
             return GLib.SOURCE_CONTINUE;
         });
-        this._mapSignal = global.window_manager.connect('map', (_manager, actor) => this._positionResult(actor.meta_window));
+        this._mapSignal = global.window_manager.connect('map', (_manager, actor) => {
+            this._positionResult(actor.meta_window);
+            this._positionStatus(actor.meta_window);
+            this._setMainAbove(actor.meta_window, Boolean(this._config?.pin_main));
+        });
     }
 
     _readConfig() {
@@ -62,30 +93,18 @@ export default class PaperTranslatorBridge extends Extension {
                 this._tracker.suspend();
             }
             this._config = value;
-            const signature = JSON.stringify([value.screenshot, value.toggle]);
-            if (signature !== this._signature) {
-                this._unbind();
-                this._signature = signature;
-                this._status = '';
-                for (const [key, accelerator, command] of [
-                    ['paper-translator-screenshot', value.screenshot, 'screenshot'],
-                    ['paper-translator-toggle', value.toggle, 'toggle'],
-                ]) {
-                    if (typeof accelerator !== 'string' || accelerator.length > 100)
-                        continue;
-                    this._settings.set_strv(key, [accelerator]);
-                    const action = Main.wm.addKeybinding(key, this._settings, Meta.KeyBindingFlags.NONE,
-                        Shell.ActionMode.NORMAL, () => {
-                            if (command === 'screenshot' && this._config?.translation_enabled)
-                                this._startNativeScreenshot();
-                            else if (command === 'toggle')
-                                this._send({command});
-                        });
-                    if (action === Meta.KeyBindingAction.NONE)
-                        this._status += `快捷键 ${accelerator} 注册失败，请修改设置。`;
-                    else
-                        this._bound.push(key);
-                }
+            if (this._mainPinned !== Boolean(value.pin_main)) {
+                this._mainPinned = Boolean(value.pin_main);
+                for (const actor of global.get_window_actors())
+                    this._setMainAbove(actor.meta_window, this._mainPinned);
+            }
+            const failed = this._hotkeys.sync([
+                ['paper-translator-screenshot', value.screenshot],
+                ['paper-translator-toggle', value.toggle],
+            ]);
+            const status = failed.map(accelerator => `快捷键 ${accelerator} 注册失败，请修改设置。`).join(' ');
+            if (status !== this._status) {
+                this._status = status;
                 this._send({command: 'bridge', status: this._status});
             }
         } catch (_error) {
@@ -95,20 +114,14 @@ export default class PaperTranslatorBridge extends Extension {
 
     _deactivate() {
         this._config = null;
+        this._mainPinned = null;
         this._epoch++;
         this._tracker.suspend();
-        this._unbind();
-        this._signature = '';
-    }
-
-    _unbind() {
-        for (const key of this._bound ?? [])
-            Main.wm.removeKeybinding(key);
-        this._bound = [];
+        this._hotkeys.clear();
     }
 
     _pollSelection() {
-        if (!this._alive || !this._config?.enabled || this._polling || Main.sessionMode.isLocked)
+        if (!this._alive || !this._config?.enabled || Main.sessionMode.isLocked)
             return;
         const focus = global.display.focus_window;
         const id = `${focus?.get_wm_class() ?? ''} ${focus?.get_gtk_application_id() ?? ''}`.toLowerCase();
@@ -116,23 +129,32 @@ export default class PaperTranslatorBridge extends Extension {
             this._tracker.suspend();
             return;
         }
-        const [, , modifiers] = global.get_pointer();
+        const [x, y, modifiers] = global.get_pointer();
         const dragging = Boolean(modifiers & Clutter.ModifierType.BUTTON1_MASK);
         if (dragging) {
-            this._tracker.feed('', GLib.get_monotonic_time() / 1000, true);
+            this._tracker.feed('', GLib.get_monotonic_time() / 1000, true, {x, y});
             return;
         }
+        if (this._polling)
+            return;
         this._polling = true;
         const epoch = this._epoch;
-        this._clipboard.get_text(St.ClipboardType.PRIMARY, (_clipboard, text) => {
-            this._polling = false;
-            if (!this._alive || !this._config?.enabled || epoch !== this._epoch)
-                return;
-            const [, , currentModifiers] = global.get_pointer();
-            const selected = this._tracker.feed(text, GLib.get_monotonic_time() / 1000,
-                Boolean(currentModifiers & Clutter.ModifierType.BUTTON1_MASK));
-            if (selected && selected.length <= 10000)
-                this._send({command: 'selection', text: selected});
+        this._clipboard.get_text(St.ClipboardType.CLIPBOARD, (_clipboard, clipboardText) => {
+            const changed = this._lastClipboardText !== undefined && clipboardText !== this._lastClipboardText;
+            this._lastClipboardText = clipboardText;
+            this._clipboard.get_text(St.ClipboardType.PRIMARY, (_primaryClipboard, text) => {
+                this._polling = false;
+                if (!this._alive || !this._config?.enabled || epoch !== this._epoch)
+                    return;
+                if (changed)
+                    this._tracker.cancelText(clipboardText || text);
+                const [currentX, currentY, currentModifiers] = global.get_pointer();
+                const selected = this._tracker.feed(text, GLib.get_monotonic_time() / 1000,
+                    Boolean(currentModifiers & Clutter.ModifierType.BUTTON1_MASK),
+                    {x: currentX, y: currentY});
+                if (selected && selected.length <= 10000)
+                    this._send({command: 'selection', text: selected});
+            });
         });
     }
 
@@ -185,53 +207,15 @@ export default class PaperTranslatorBridge extends Extension {
         this._send({command: 'screenshot_native', capture_id: captureId}, () => {
             if (!this._alive)
                 return;
-            let taken = false;
-            let dragStart = null;
-            let submitting = false;
-            const selector = ui._areaSelector;
-            const dragStartSignal = selector?.connect('drag-started', () => {
-                const [x, y] = global.get_pointer();
-                dragStart = {x, y};
-            });
-            const dragEndSignal = selector?.connect('drag-ended', () => {
-                if (!dragStart || submitting || !ui.visible || !ui._selectionButton?.checked)
-                    return;
-                const [x, y] = global.get_pointer();
-                const [,, width, height] = selector.getGeometry();
-                const moved = Math.hypot(x - dragStart.x, y - dragStart.y);
-                dragStart = null;
-                if (moved < 8 || width < 12 || height < 12)
-                    return;
-                submitting = true;
-                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                    ui._onCaptureButtonClicked?.();
+            const session = attachScreenshotSignals(ui, captureId,
+                message => this._send(message),
+                callback => GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    callback();
                     return GLib.SOURCE_REMOVE;
-                });
-            });
-            const disconnectSignals = () => {
-                ui.disconnect(takenSignal);
-                ui.disconnect(closedSignal);
-                if (selector && dragStartSignal)
-                    selector.disconnect(dragStartSignal);
-                if (selector && dragEndSignal)
-                    selector.disconnect(dragEndSignal);
-            };
-            const takenSignal = ui.connect('screenshot-taken', (_ui, file) => {
-                taken = true;
-                this._send({command: 'screenshot_file', capture_id: captureId,
-                    path: file.get_path()});
-            });
-            const closedSignal = ui.connect('closed', () => {
-                disconnectSignals();
-                if (!taken)
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
-                        this._send({command: 'screenshot_cancel', capture_id: captureId});
-                        return GLib.SOURCE_REMOVE;
-                    });
-            });
+                }));
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 180, () => {
                 if (!this._alive) {
-                    disconnectSignals();
+                    session.close();
                     return GLib.SOURCE_REMOVE;
                 }
                 ui.open().then(() => {
@@ -240,8 +224,7 @@ export default class PaperTranslatorBridge extends Extension {
                     if (ui._selectionButton)
                         ui._selectionButton.checked = true;
                 }).catch(_error => {
-                    disconnectSignals();
-                    this._send({command: 'screenshot_cancel', capture_id: captureId});
+                    session.close();
                 });
                 return GLib.SOURCE_REMOVE;
             });
@@ -272,6 +255,32 @@ export default class PaperTranslatorBridge extends Extension {
         }
     }
 
+    _positionStatus(window) {
+        if (!window || window.get_title?.() !== 'Paper Translator · 翻译状态')
+            return;
+        try {
+            window.make_above();
+            const frame = window.get_frame_rect();
+            const area = window.get_work_area_current_monitor();
+            window.move_frame(false, area.x + Math.floor((area.width - frame.width) / 2), area.y + 32);
+        } catch (_error) {
+            // Qt positioning remains the fallback if Shell refuses the move.
+        }
+    }
+
+    _setMainAbove(window, pinned) {
+        if (!window || window.get_title?.() !== 'Paper Translator')
+            return;
+        try {
+            if (pinned)
+                window.make_above();
+            else
+                window.unmake_above();
+        } catch (_error) {
+            // Qt's WindowStaysOnTopHint remains the fallback on other desktops.
+        }
+    }
+
     disable() {
         this._alive = false;
         this._epoch++;
@@ -284,7 +293,9 @@ export default class PaperTranslatorBridge extends Extension {
             global.window_manager.disconnect(this._mapSignal);
         if (this._copySignal)
             global.stage.disconnect(this._copySignal);
-        this._unbind();
+        if (this._ownerSignal)
+            this._selection.disconnect(this._ownerSignal);
+        this._hotkeys?.clear();
         this._config = null;
         this._clipboard = null;
         this._settings = null;

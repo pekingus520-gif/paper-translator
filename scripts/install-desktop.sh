@@ -5,9 +5,9 @@ launcher="$project_dir/PaperTranslator"
 if [[ ! -x "$launcher" ]]; then
   launcher="$project_dir/scripts/run-linux.sh"
 fi
-icon="$project_dir/assets/paper-translator-icon.png"
+icon="$project_dir/assets/paper-translator-shortcut.png"
 if [[ ! -f "$icon" ]]; then
-  icon="$project_dir/src/paper_translator/assets/paper-translator-icon.png"
+  icon="$project_dir/src/paper_translator/assets/paper-translator-shortcut.png"
 fi
 app_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$app_dir"

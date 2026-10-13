@@ -36,6 +36,7 @@ class WaylandAdapter(InputAdapter):
             'generation': self.generation,
             'enabled': self.settings.enabled and self.settings.selection_enabled,
             'translation_enabled': self.settings.enabled,
+            'pin_main': self.settings.main_window_on_top,
             'screenshot': gnome_accelerator(self.settings.screenshot_hotkey),
             'toggle': gnome_accelerator(self.settings.toggle_hotkey),
         })

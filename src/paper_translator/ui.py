@@ -1,15 +1,19 @@
 from dataclasses import replace
+from functools import lru_cache
+import math
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import (QEvent, QEasingCurve, QPoint, Property, QPropertyAnimation,
+from PySide6.QtCore import (QEvent, QEasingCurve, QPoint, Property, QPropertyAnimation, QTimer,
                            Qt, QVariantAnimation, Signal)
-from PySide6.QtGui import QColor, QCursor, QKeySequence, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox,
     QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox, QTabWidget,
+    QLineEdit, QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox, QSplitter, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget)
+
+from .sentences import sentence_spans
 
 
 THEMES = {
@@ -18,22 +22,70 @@ THEMES = {
         'muted': '#94a3b8', 'card': 'rgba(12,20,38,218)',
         'card_border': 'rgba(148,163,184,52)', 'input': 'rgba(255,255,255,14)',
         'input_focus': 'rgba(255,255,255,22)', 'input_border': 'rgba(148,163,184,56)',
-        'accent': '#818cf8', 'accent_hover': '#a5b4fc', 'button_text': '#111827',
+        'accent': '#7898b5', 'accent_hover': '#91adc5', 'button_text': '#10263a',
         'preview_border': (148, 163, 184, 52),
     },
     'light': {
         'canvas': '#edf2fb', 'overlay': (245, 248, 255, 72), 'text': '#172033',
-        'muted': '#64748b', 'card': 'rgba(255,255,255,222)',
-        'card_border': 'rgba(100,116,139,60)', 'input': 'rgba(248,250,252,218)',
-        'input_focus': 'rgba(255,255,255,238)', 'input_border': 'rgba(100,116,139,70)',
-        'accent': '#4f46e5', 'accent_hover': '#4338ca', 'button_text': '#ffffff',
+        'muted': '#64748b', 'card': 'rgba(255,255,255,132)',
+        'card_border': 'rgba(89,120,153,75)', 'input': 'rgba(248,251,255,88)',
+        'input_focus': 'rgba(248,251,255,132)', 'input_border': 'rgba(89,120,153,92)',
+        'accent': '#577fa4', 'accent_hover': '#6e93b5', 'button_text': '#ffffff',
         'preview_border': (100, 116, 139, 70),
     },
 }
 
 
-def theme_colors(name):
-    return THEMES.get(name, THEMES['dark'])
+@lru_cache(maxsize=16)
+def _sample_wallpaper_hue(path, modified, size):
+    image = QImage(path)
+    if image.isNull():
+        return None
+    image = image.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    bins = [[0.0, 0.0, 0.0] for _ in range(18)]
+    for y in range(image.height()):
+        for x in range(image.width()):
+            pixel = QColor(image.pixel(x, y))
+            hue, saturation, value, _ = pixel.getHsvF()
+            if hue < 0 or saturation < .13 or value < .12:
+                continue
+            weight = saturation * min(value, .85)
+            bucket = bins[min(17, int(hue * 18))]
+            bucket[0] += weight
+            bucket[1] += weight * math.sin(hue * math.tau)
+            bucket[2] += weight * math.cos(hue * math.tau)
+    winning = max(bins, key=lambda bucket: bucket[0])
+    if winning[0] < .01:
+        return None
+    return (math.atan2(winning[1], winning[2]) / math.tau) % 1.0
+
+
+def wallpaper_hue(path):
+    if not path:
+        return None
+    try:
+        file = Path(path)
+        stat = file.stat()
+        return _sample_wallpaper_hue(str(file), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+def theme_colors(name, wallpaper_path=''):
+    name = name if name in THEMES else 'dark'
+    colors = dict(THEMES[name])
+    hue = wallpaper_hue(wallpaper_path)
+    if hue is None:
+        return colors
+    value = .75 if name == 'dark' else .57
+    accent = QColor.fromHsvF(hue, .48, value)
+    hover = QColor.fromHsvF(hue, .40, min(1.0, value + .10))
+    colors['accent'] = accent.name()
+    colors['accent_hover'] = hover.name()
+    colors['card_border'] = _color_css(QColor(accent.red(), accent.green(), accent.blue(), 80))
+    colors['input_border'] = _color_css(QColor(accent.red(), accent.green(), accent.blue(), 90))
+    return colors
 
 
 def _qcolor(value):
@@ -41,6 +93,8 @@ def _qcolor(value):
         return QColor(*value)
     if isinstance(value, QColor):
         return QColor(value)
+    if isinstance(value, str) and value.startswith('rgba(') and value.endswith(')'):
+        return QColor(*(int(channel.strip()) for channel in value[5:-1].split(',')))
     return QColor(value)
 
 
@@ -62,34 +116,45 @@ def blend_palette(start, end, progress):
     return blended
 
 
-def dialog_palette(name):
-    base = theme_colors(name)
+def dialog_palette(name, wallpaper_path=''):
+    base = theme_colors(name, wallpaper_path)
     if name == 'light':
         values = {
             'background': '#f3f6fc', 'text': '#172033', 'label': '#475569',
             'muted': '#64748b', 'panel': '#ffffff', 'border': '#cbd5e1',
             'selected': '#e3e8f2', 'group': 'rgba(255,255,255,205)',
-            'title_background': '#f3f6fc', 'groove': '#cbd5e1', 'handle': '#4f46e5',
+            'title_background': '#f3f6fc', 'groove': '#cbd5e1', 'handle': '#577fa4',
         }
     else:
         values = {
             'background': '#0f172a', 'text': '#f8fafc', 'label': '#cbd5e1',
             'muted': '#94a3b8', 'panel': '#111827', 'border': '#334155',
             'selected': '#1e293b', 'group': 'rgba(17,24,39,120)',
-            'title_background': '#0f172a', 'groove': '#334155', 'handle': '#e0e7ff',
+            'title_background': '#0f172a', 'groove': '#334155', 'handle': '#a9c1d6',
         }
     values.update({key: base[key] for key in ('accent', 'accent_hover', 'button_text')})
+    values['handle'] = base['accent']
     return values
 
 
-def result_palette(name):
-    base = theme_colors(name)
+def result_palette(name, wallpaper_path=''):
+    base = theme_colors(name, wallpaper_path)
     if name == 'light':
         values = {'background': '#f3f6fc', 'panel': '#ffffff', 'text': '#172033',
                   'muted': '#64748b', 'border': '#cbd5e1'}
     else:
         values = {'background': '#0f172a', 'panel': '#111827', 'text': '#f8fafc',
                   'muted': '#94a3b8', 'border': '#334155'}
+    hue = wallpaper_hue(wallpaper_path)
+    if hue is not None:
+        if name == 'light':
+            values.update(background=QColor.fromHsvF(hue, .10, .97).name(),
+                          panel=QColor.fromHsvF(hue, .055, 1.0).name(),
+                          border=QColor.fromHsvF(hue, .22, .79).name())
+        else:
+            values.update(background=QColor.fromHsvF(hue, .28, .11).name(),
+                          panel=QColor.fromHsvF(hue, .20, .17).name(),
+                          border=QColor.fromHsvF(hue, .25, .34).name())
     values.update({key: base[key] for key in ('accent', 'accent_hover', 'button_text')})
     return values
 
@@ -119,12 +184,13 @@ class ThemedComboBox(QComboBox):
         super().__init__(parent)
         self.theme_name = 'dark'
 
-    def apply_popup_theme(self, name):
+    def apply_popup_theme(self, name, accent=None):
         self.theme_name = name if name in THEMES else 'dark'
+        self.accent = accent or THEMES[self.theme_name]['accent']
         if self.theme_name == 'light':
-            panel, text, border, selected = '#ffffff', '#172033', '#cbd5e1', '#4f46e5'
+            panel, text, border, selected = '#ffffff', '#172033', '#cbd5e1', self.accent
         else:
-            panel, text, border, selected = '#111827', '#f8fafc', '#334155', '#818cf8'
+            panel, text, border, selected = '#111827', '#f8fafc', '#334155', self.accent
         popup = self.view().window()
         popup.setProperty('paperTranslatorTheme', self.theme_name)
         palette = popup.palette()
@@ -142,9 +208,9 @@ class ThemedComboBox(QComboBox):
             QAbstractItemView::item {{ min-height:30px; padding:4px 10px; border:0; }}''')
 
     def showPopup(self):
-        self.apply_popup_theme(self.theme_name)
+        self.apply_popup_theme(self.theme_name, getattr(self, 'accent', None))
         super().showPopup()
-        self.apply_popup_theme(self.theme_name)
+        self.apply_popup_theme(self.theme_name, getattr(self, 'accent', None))
 
 
 class WallpaperCanvas(QWidget):
@@ -208,6 +274,7 @@ class HoverButton(QPushButton):
         super().__init__(text, parent)
         self._level = 0.0
         self.theme_name = 'dark'
+        self.accent = QColor(THEMES['dark']['accent'])
         self.motion = QPropertyAnimation(self, b'hoverLevel', self)
         self.motion.setDuration(150)
         self.motion.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -238,21 +305,22 @@ class HoverButton(QPushButton):
         super().leaveEvent(event)
 
     def _restyle(self):
+        red, green, blue, _ = self.accent.getRgb()
         if self.theme_name == 'light':
             color = '#172033'
-            background = f'rgba(255,255,255,{round(150 + self._level * 70)})'
-            border_color = f'rgba(71,85,105,{round(45 + self._level * 60)})'
+            background = f'rgba({red},{green},{blue},{round(120 + self._level * 58)})'
+            border_color = f'rgba({red},{green},{blue},{round(90 + self._level * 70)})'
         else:
-            color = '#f8fafc'
-            background = f'rgba(255,255,255,{round(30 + self._level * 25)})'
-            border_color = f'rgba(255,255,255,{round(55 + self._level * 65)})'
+            color = '#e7f1f9'
+            background = f'rgba({red},{green},{blue},{round(58 + self._level * 52)})'
+            border_color = f'rgba({red},{green},{blue},{round(82 + self._level * 62)})'
         self.setStyleSheet(f'''QPushButton {{ color:{color}; background:{background};
             border:1px solid {border_color}; border-radius:12px;
             padding:8px 18px; font-weight:600; }}''')
 
-    def apply_theme(self, name):
+    def apply_theme(self, name, accent=None):
         self.theme_name = name if name in THEMES else 'dark'
-        colors = theme_colors(self.theme_name)
+        self.accent = QColor(accent or THEMES[self.theme_name]['accent'])
         self._restyle()
 
 
@@ -266,25 +334,25 @@ class WindowControlButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.apply_theme('dark')
 
-    def apply_theme(self, name):
+    def apply_theme(self, name, accent=None):
         self.theme_name = name if name in THEMES else 'dark'
-        colors = theme_colors(self.theme_name)
+        selected = QColor(accent or THEMES[self.theme_name]['accent'])
+        red, green, blue, _ = selected.getRgb()
         if self.theme_name == 'light':
-            color, background = '#334155', 'rgba(255,255,255,145)'
-            border, pressed = 'rgba(71,85,105,38)', 'rgba(226,232,240,220)'
-            hover = 'rgba(239,68,68,220)' if self.close_button else 'rgba(255,255,255,225)'
+            color, background = '#172033', f'rgba({red},{green},{blue},102)'
+            border, pressed = f'rgba({red},{green},{blue},65)', f'rgba({red},{green},{blue},185)'
+            hover = f'rgba({red},{green},{blue},165)'
         else:
-            color, background = '#f8fafc', 'rgba(255,255,255,12)'
-            border, pressed = 'rgba(255,255,255,25)', 'rgba(255,255,255,55)'
-            hover = 'rgba(239,68,68,220)' if self.close_button else 'rgba(255,255,255,38)'
-        accent_border = ('rgba(79,70,229,90)' if self.theme_name == 'light'
-                         else 'rgba(129,140,248,100)')
+            color, background = '#e7f1f9', f'rgba({red},{green},{blue},44)'
+            border, pressed = f'rgba({red},{green},{blue},58)', f'rgba({red},{green},{blue},115)'
+            hover = f'rgba({red},{green},{blue},92)'
+        accent_border = f'rgba({red},{green},{blue},115)'
         self.setStyleSheet(f'''QPushButton {{ color:{color}; background:{background};
             border:1px solid {border}; border-radius:11px; font-size:17px;
             font-weight:500; padding:0; }}
-            QPushButton:hover {{ color:{'#ffffff' if self.close_button else color};
+            QPushButton:hover {{ color:{color};
                 background:{hover}; border-color:{accent_border}; }}
-            QPushButton:pressed {{ background:{pressed}; }}''')
+            QPushButton:pressed, QPushButton:checked {{ background:{pressed}; border-color:{accent_border}; }}''')
 
 
 class WindowTitleBar(QFrame):
@@ -314,6 +382,11 @@ class WindowTitleBar(QFrame):
         layout.addStretch()
         self.settings_button = HoverButton('设置')
         layout.addWidget(self.settings_button)
+        self.pin_button = WindowControlButton('📌', 'pinButton')
+        self.pin_button.setCheckable(True)
+        self.pin_button.setToolTip('主窗口置顶')
+        self.pin_button.toggled.connect(window.set_pinned)
+        layout.addWidget(self.pin_button)
         self.minimize_button = WindowControlButton('−', 'minimizeButton')
         self.maximize_button = WindowControlButton('□', 'maximizeButton')
         self.close_button = WindowControlButton('×', 'closeButton', close_button=True)
@@ -325,14 +398,14 @@ class WindowTitleBar(QFrame):
         self.maximize_button.clicked.connect(window.toggle_maximize)
         self.close_button.clicked.connect(window.close)
 
-    def apply_theme(self, name):
+    def apply_theme(self, name, accent=None):
         colors = theme_colors(name)
         self._set_logo_color(colors['text'])
         self.brand.setStyleSheet(
             f"color:{colors['text']}; font-size:22px; font-weight:700; letter-spacing:0.4px;")
-        self.settings_button.apply_theme(name)
-        for button in (self.minimize_button, self.maximize_button, self.close_button):
-            button.apply_theme(name)
+        self.settings_button.apply_theme(name, accent)
+        for button in (self.pin_button, self.minimize_button, self.maximize_button, self.close_button):
+            button.apply_theme(name, accent)
 
     def _set_logo_color(self, color):
         source = QPixmap(str(application_asset_path('paper-translator-icon.png')))
@@ -435,6 +508,7 @@ class WallpaperPreview(QFrame):
 class SettingsDialog(QDialog):
     theme_changed = Signal(str)
     opacity_changed = Signal(int)
+    wallpaper_changed = Signal(str)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -442,7 +516,8 @@ class SettingsDialog(QDialog):
         self.setWindowTitle('翻译设置')
         self.resize(620, 570)
         self.theme_name = settings.color_theme if settings.color_theme in THEMES else 'dark'
-        self._dialog_colors = dialog_palette(self.theme_name)
+        self._wallpaper_path = settings.wallpaper_path
+        self._dialog_colors = dialog_palette(self.theme_name, self._wallpaper_path)
         self._theme_start = self._dialog_colors
         self._theme_target = self._dialog_colors
         self.theme_transition = QVariantAnimation(self)
@@ -494,6 +569,7 @@ class SettingsDialog(QDialog):
         browse.clicked.connect(self._choose_wallpaper)
         clear.clicked.connect(self.wallpaper_path.clear)
         self.wallpaper_path.textChanged.connect(self.wallpaper_preview.set_image)
+        self.wallpaper_path.textChanged.connect(self._wallpaper_selected)
         wallpaper_row = QWidget()
         wallpaper_layout = QHBoxLayout(wallpaper_row)
         wallpaper_layout.setContentsMargins(0, 0, 0, 0)
@@ -559,6 +635,8 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存')
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        buttons.button(QDialogButtonBox.StandardButton.Save).setIcon(QIcon())
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setIcon(QIcon())
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -599,12 +677,12 @@ class SettingsDialog(QDialog):
 
     def apply_theme(self, name, animated=True):
         name = name if name in THEMES else 'dark'
-        target = dialog_palette(name)
-        should_animate = animated and self.isVisible() and name != self.theme_name
+        target = dialog_palette(name, self._wallpaper_path)
+        should_animate = animated and self.isVisible() and target != self._dialog_colors
         self.theme_name = name
         if hasattr(self, 'mode'):
-            self.mode.apply_popup_theme(name)
-            self.color_theme.apply_popup_theme(name)
+            self.mode.apply_popup_theme(name, target['accent'])
+            self.color_theme.apply_popup_theme(name, target['accent'])
         self.theme_transition.stop()
         if should_animate:
             self._theme_start = dict(self._dialog_colors)
@@ -621,6 +699,11 @@ class SettingsDialog(QDialog):
         self.apply_theme(name)
         self.wallpaper_preview.set_theme(name)
         self.theme_changed.emit(name)
+
+    def _wallpaper_selected(self, path):
+        self._wallpaper_path = path
+        self.apply_theme(self.theme_name)
+        self.wallpaper_changed.emit(path)
 
     def _line(self, form, name, label, settings, secret=False):
         widget = QLineEdit(str(getattr(settings, name)))
@@ -663,6 +746,55 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class StatusToast(QWidget):
+    """Brief, non-activating feedback for the global translation switch."""
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
+                         Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowTitle('Paper Translator · 翻译状态')
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(232, 68)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.panel = QFrame()
+        self.panel.setObjectName('statusToastPanel')
+        row = QHBoxLayout(self.panel)
+        row.setContentsMargins(18, 12, 18, 12)
+        row.setSpacing(12)
+        self.indicator = QLabel('●')
+        self.indicator.setObjectName('statusToastIndicator')
+        self.message = QLabel()
+        self.message.setObjectName('statusToastMessage')
+        row.addWidget(self.indicator)
+        row.addWidget(self.message, 1)
+        layout.addWidget(self.panel)
+        self.dismiss_timer = QTimer(self)
+        self.dismiss_timer.setSingleShot(True)
+        self.dismiss_timer.timeout.connect(self.hide)
+
+    def show_state(self, enabled, theme='dark', wallpaper_path='', opacity=100):
+        colors = theme_colors(theme, wallpaper_path)
+        panel = 'rgba(16,24,42,238)' if theme == 'dark' else 'rgba(249,251,255,245)'
+        border = colors['accent']
+        self.message.setText('翻译已开启' if enabled else '翻译已暂停')
+        self.setStyleSheet(f'''QFrame#statusToastPanel {{ background:{panel};
+            border:1px solid {border}; border-radius:17px; }}
+            QLabel#statusToastMessage {{ color:{colors['text']}; font-size:16px; font-weight:700;
+                background:transparent; border:0; }}
+            QLabel#statusToastIndicator {{ color:{border if enabled else colors['muted']};
+                font-size:18px; background:transparent; border:0; }}''')
+        self.setWindowOpacity(max(.3, min(1.0, opacity / 100)))
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if screen:
+            area = screen.availableGeometry()
+            self.move(area.center().x() - self.width() // 2, area.top() + 32)
+        self.show()
+        self.raise_()
+        self.dismiss_timer.start(1800)
+
+
 class ResultWindow(QWidget):
     retry = Signal(str)
 
@@ -679,11 +811,25 @@ class ResultWindow(QWidget):
         layout.addWidget(self.source_label)
         self.source = QTextEdit()
         self.source.setAcceptRichText(False)
-        self.source.setMaximumHeight(110)
-        layout.addWidget(self.source)
+        self.source.setMinimumHeight(65)
         self.output = QTextEdit()
         self.output.setReadOnly(True)
-        layout.addWidget(self.output)
+        self.output.setMinimumHeight(80)
+        self.text_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.text_splitter.setChildrenCollapsible(False)
+        self.text_splitter.setOpaqueResize(True)
+        self.text_splitter.setHandleWidth(10)
+        self.text_splitter.addWidget(self.source)
+        self.text_splitter.addWidget(self.output)
+        self.text_splitter.setSizes([130, 210])
+        layout.addWidget(self.text_splitter, 1)
+        self._sentence_spans = {'source': [], 'output': []}
+        self._sentence_pairs = []
+        self._active_sentences = None
+        for editor in (self.source, self.output):
+            editor.viewport().setMouseTracking(True)
+            editor.viewport().installEventFilter(self)
+        self.source.textChanged.connect(self._source_changed)
         row = QHBoxLayout()
         retry, copy, close = QPushButton('重新翻译'), QPushButton('复制译文'), QPushButton('关闭')
         retry.clicked.connect(lambda: self.retry.emit(self.source.toPlainText()))
@@ -694,7 +840,9 @@ class ResultWindow(QWidget):
         self.action_buttons = (retry, copy, close)
         layout.addLayout(row)
         self.translation = ''
+        self._pending_source = ''
         self.theme_name = 'dark'
+        self.wallpaper_path = ''
         self._result_colors = result_palette('dark')
         self._theme_start = self._result_colors
         self._theme_target = self._result_colors
@@ -713,9 +861,84 @@ class ResultWindow(QWidget):
             QTextEdit {{ color:{colors['text']}; background:{colors['panel']}; border:1px solid {colors['border']};
                 border-radius:12px; padding:10px; selection-background-color:{colors['accent']}; }}
             QTextEdit:focus {{ border-color:{colors['accent']}; }}
+            QSplitter::handle:vertical {{ background:{colors['border']}; border-radius:3px;
+                margin:2px 125px; }}
+            QSplitter::handle:vertical:hover {{ background:{colors['accent']}; }}
             QPushButton {{ color:{colors['button_text']}; background:{colors['accent']}; border:0;
                 border-radius:9px; padding:8px 14px; font-weight:600; }}
             QPushButton:hover {{ background:{colors['accent_hover']}; }}''')
+        if self._active_sentences is not None:
+            self._highlight_ranges(*self._active_sentences)
+
+    @staticmethod
+    def _split_sentences(text):
+        return sentence_spans(text)
+
+    def _source_changed(self):
+        self._sentence_spans['source'] = self._split_sentences(self.source.toPlainText())
+        self._sentence_pairs = []
+        self._clear_highlights()
+
+    def _clear_highlights(self):
+        self._active_sentences = None
+        self.source.setExtraSelections([])
+        self.output.setExtraSelections([])
+
+    def _highlight_ranges(self, source_range, output_range):
+        self._active_sentences = (source_range, output_range)
+        color = QColor(self._result_colors['accent'])
+        color.setAlpha(78 if self.theme_name == 'dark' else 54)
+        for span, editor in ((source_range, self.source), (output_range, self.output)):
+            if span is None:
+                editor.setExtraSelections([])
+                continue
+            start, end = span
+            cursor = QTextCursor(editor.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format.setBackground(color)
+            editor.setExtraSelections([selection])
+
+    @staticmethod
+    def _scroll_range_into_view(editor, span):
+        cursor = QTextCursor(editor.document())
+        cursor.setPosition(span[0])
+        rect = editor.cursorRect(cursor)
+        height = editor.viewport().height()
+        if rect.top() < 0 or rect.bottom() > height:
+            scroll = editor.verticalScrollBar()
+            scroll.setValue(scroll.value() + rect.center().y() - height // 2)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseMove and self.translation:
+            if watched is self.source.viewport():
+                side, editor = 'source', self.source
+            elif watched is self.output.viewport():
+                side, editor = 'output', self.output
+            else:
+                return super().eventFilter(watched, event)
+            position = editor.cursorForPosition(event.position().toPoint()).position()
+            if side == 'output' and position >= len(self.translation):
+                return super().eventFilter(watched, event)
+            spans = self._sentence_spans[side]
+            hovered = next((span for span in spans if span[0] <= position < span[1]), None)
+            if hovered is not None:
+                pair = next((item for item in self._sentence_pairs
+                             if (item[0] <= position < item[1] if side == 'source'
+                                 else item[2] <= position < item[3])), None)
+                if pair:
+                    selection = ((pair[0], pair[1]), (pair[2], pair[3]))
+                else:
+                    selection = (hovered, None) if side == 'source' else (None, hovered)
+                if selection != self._active_sentences:
+                    self._highlight_ranges(*selection)
+                counterpart = selection[1] if side == 'source' else selection[0]
+                if counterpart is not None:
+                    self._scroll_range_into_view(self.output if side == 'source' else self.source,
+                                                 counterpart)
+        return super().eventFilter(watched, event)
 
     def _theme_frame(self, progress):
         self._render_theme(blend_palette(
@@ -723,8 +946,8 @@ class ResultWindow(QWidget):
 
     def apply_theme(self, name, animated=True):
         name = name if name in THEMES else 'dark'
-        target = result_palette(name)
-        should_animate = animated and self.isVisible() and name != self.theme_name
+        target = result_palette(name, self.wallpaper_path)
+        should_animate = animated and self.isVisible() and target != self._result_colors
         self.theme_name = name
         self.theme_transition.stop()
         if should_animate:
@@ -737,9 +960,24 @@ class ResultWindow(QWidget):
             self._theme_target = target
             self._render_theme(target)
 
+    def set_wallpaper(self, path):
+        self.wallpaper_path = path
+        self.apply_theme(self.theme_name)
+
     def display(self, result):
+        was_visible = self.isVisible()
+        self._pending_source = ''
         self.translation = result.translation
         self.source.setPlainText(result.source)
+        self._sentence_spans['output'] = self._split_sentences(result.translation)
+        pairs = getattr(result, 'sentence_pairs', [])
+        if not pairs and len(self._sentence_spans['source']) == len(self._sentence_spans['output']) == 1:
+            pairs = [(*source, *output) for source, output in zip(
+                self._sentence_spans['source'], self._sentence_spans['output'])]
+        self._sentence_pairs = [pair for pair in pairs if len(pair) == 4 and
+                                0 <= pair[0] < pair[1] <= len(result.source) and
+                                0 <= pair[2] < pair[3] <= len(result.translation)]
+        self._clear_highlights()
         self.status.setText('论文模式 · AI 已复核（请结合原文核对）' if result.reviewed else
                             ('论文模式 · 仅初译' if result.mode == 'paper' else '日常模式'))
         sections = [result.translation]
@@ -748,23 +986,29 @@ class ResultWindow(QWidget):
         if result.ambiguities:
             sections.append('歧义 / 需核对\n' + '\n'.join(result.ambiguities))
         self.output.setPlainText('\n\n'.join(sections))
-        self._near_cursor()
+        if not was_visible:
+            self._near_cursor()
         self.show()
+        self.raise_()
 
     def prepare(self, text):
-        self.source.setPlainText(text)
-        self.translation = ''
-        self.output.clear()
-        self.status.setText('正在翻译…')
-        self._near_cursor()
-        self.show()
+        # Preserve the previous result while the next translation is pending.
+        self._pending_source = text
 
     def show_error(self, message):
+        was_visible = self.isVisible()
+        if self._pending_source:
+            self.source.setPlainText(self._pending_source)
+            self._pending_source = ''
         self.status.setText('翻译未完成')
         self.output.setPlainText(message)
         self.translation = ''
-        self._near_cursor()
+        self._sentence_spans['output'] = []
+        self._clear_highlights()
+        if not was_visible:
+            self._near_cursor()
         self.show()
+        self.raise_()
 
     def _near_cursor(self):
         point = QCursor.pos()
@@ -787,11 +1031,13 @@ class MainWindow(QMainWindow):
     toggle = Signal()
     settings_requested = Signal()
     manual = Signal(str)
+    pin_changed = Signal(bool)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Paper Translator')
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self._pinned = False
         self.setMinimumSize(460, 320)
         self.resize(720, 520)
         widget = WallpaperCanvas()
@@ -830,6 +1076,7 @@ class MainWindow(QMainWindow):
         self.allow_quit = False
         self._resize_margin = 8
         self.theme_name = 'dark'
+        self.wallpaper_path = ''
         self._main_colors = dict(theme_colors('dark'))
         self._theme_start = self._main_colors
         self._theme_target = self._main_colors
@@ -848,6 +1095,23 @@ class MainWindow(QMainWindow):
         else:
             self.showMaximized()
             self.title_bar.maximize_button.setText('❐')
+
+    def set_pinned(self, enabled):
+        enabled = bool(enabled)
+        if self._pinned == enabled:
+            return
+        self._pinned = enabled
+        was_visible = self.isVisible()
+        was_maximized = self.isMaximized()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+        self.title_bar.pin_button.blockSignals(True)
+        self.title_bar.pin_button.setChecked(enabled)
+        self.title_bar.pin_button.blockSignals(False)
+        self.title_bar.pin_button.setToolTip('取消主窗口置顶' if enabled else '主窗口置顶')
+        if was_visible:
+            self.showMaximized() if was_maximized else self.show()
+            self.raise_()
+        self.pin_changed.emit(enabled)
 
     def resize_edges(self, point):
         if self.isMaximized() or self.isFullScreen():
@@ -895,6 +1159,8 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def refresh(self, settings):
+        self.set_pinned(settings.main_window_on_top)
+        self.wallpaper_path = settings.wallpaper_path
         self.apply_theme(settings.color_theme)
         self.wallpaper.set_appearance(settings.wallpaper_path)
         self.setWindowOpacity(settings.window_opacity / 100)
@@ -920,10 +1186,10 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self, name, animated=True):
         name = name if name in THEMES else 'dark'
-        target = theme_colors(name)
-        should_animate = animated and self.isVisible() and name != self.theme_name
+        target = theme_colors(name, self.wallpaper_path)
+        should_animate = animated and self.isVisible() and target != self._main_colors
         self.theme_name = name
-        self.title_bar.apply_theme(name)
+        self.title_bar.apply_theme(name, target['accent'])
         self.theme_transition.stop()
         if should_animate:
             self._theme_start = dict(self._main_colors)
@@ -934,6 +1200,11 @@ class MainWindow(QMainWindow):
         else:
             self._theme_target = dict(target)
             self._render_theme(target)
+
+    def set_wallpaper(self, path):
+        self.wallpaper_path = path
+        self.wallpaper.set_appearance(path)
+        self.apply_theme(self.theme_name)
 
     def closeEvent(self, event):
         if self.allow_quit:

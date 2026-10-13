@@ -83,10 +83,12 @@ class X11Adapter(InputAdapter):
             self.debouncer.suspend()
             return
         try:
-            dragging = bool(self.display.screen().root.query_pointer().mask & X.Button1Mask)
+            pointer = self.display.screen().root.query_pointer()
+            dragging = bool(pointer.mask & X.Button1Mask)
             text = '' if active or not enabled else QApplication.clipboard().text(QClipboard.Mode.Selection)
             selected = self.debouncer.feed(text, time.monotonic() * 1000,
-                                           dragging=dragging, enabled=enabled)
+                                           dragging=dragging, enabled=enabled,
+                                           point=(pointer.root_x, pointer.root_y))
             if selected:
                 self.selection.emit(selected)
         except Exception:

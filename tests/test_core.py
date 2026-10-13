@@ -68,6 +68,20 @@ def test_daily_calls_baidu_with_utf8_signature(api_server):
     assert len(requests) == 1
 
 
+def test_daily_translation_retains_exact_sentence_pairs_in_one_api_call(api_server):
+    from urllib.parse import parse_qs
+    url, requests, replies = api_server
+    replies.append((200, {'trans_result': [
+        {'src': 'First sentence.', 'dst': '第一句。另一种说法。'},
+        {'src': 'Second sentence.', 'dst': '第二句。'},
+    ]}))
+    result = Translator().translate('First sentence. Second sentence.', configured(url))
+    assert len(requests) == 1
+    assert parse_qs(requests[0][1].decode())['q'] == ['First sentence.\nSecond sentence.']
+    assert result.translation == '第一句。另一种说法。\n第二句。'
+    assert result.sentence_pairs == [(0, 15, 0, 10), (16, 32, 11, 15)]
+
+
 def test_paper_reviews_source_and_draft(api_server):
     url, requests, replies = api_server
     replies.extend([(200, {'trans_result': [{'dst': '注意'}]}),
@@ -90,6 +104,34 @@ def test_paper_reviews_source_and_draft(api_server):
     assert user['draft'] == '注意'
     assert user['discipline'] == '机器学习'
     assert headers['Authorization'] == 'Bearer ai-secret'
+
+
+def test_paper_review_keeps_verified_alignment_without_changing_translation(api_server):
+    url, requests, replies = api_server
+    replies.extend([(200, {'trans_result': [
+        {'dst': '初译一。'}, {'dst': '初译二。'}]}),
+        (200, {'choices': [{'message': {'content': json.dumps({
+            'translation': '第一句。第二句。', 'ambiguities': [],
+            'aligned_segments': ['第一句。', '第二句。']})}}]})])
+    settings = configured(url)
+    settings.mode = 'paper'
+    result = Translator().translate('First. Second.', settings)
+    assert result.translation == '第一句。第二句。'
+    assert result.sentence_pairs == [(0, 6, 0, 4), (7, 14, 4, 8)]
+
+
+def test_paper_review_ignores_inconsistent_alignment(api_server):
+    url, requests, replies = api_server
+    replies.extend([(200, {'trans_result': [
+        {'dst': '初译一。'}, {'dst': '初译二。'}]}),
+        (200, {'choices': [{'message': {'content': json.dumps({
+            'translation': '第一句。第二句。', 'ambiguities': [],
+            'aligned_segments': ['不对应', '第二句。']})}}]})])
+    settings = configured(url)
+    settings.mode = 'paper'
+    result = Translator().translate('First. Second.', settings)
+    assert result.translation == '第一句。第二句。'
+    assert not result.sentence_pairs
 
 
 @pytest.mark.parametrize('payload', [
@@ -205,14 +247,13 @@ def test_pause_and_settings_change_invalidate_results():
 
 def test_selection_is_debounced_and_never_emitted_during_drag():
     d = SelectionDebouncer(delay_ms=450)
-    assert d.feed('half', 0, dragging=True) is None
-    assert d.feed('whole sentence', 100) is None
-    assert d.feed('whole sentence', 549) is None
-    assert d.feed('whole sentence', 550) == 'whole sentence'
+    assert d.feed('old', 0) is None
+    assert d.feed('', 100, dragging=True, point=(0, 0)) is None
+    assert d.feed('', 150, dragging=True, point=(30, 0)) is None
+    assert d.feed('whole sentence', 200, point=(30, 0)) is None
+    assert d.feed('whole sentence', 649) is None
+    assert d.feed('whole sentence', 650) == 'whole sentence'
     assert d.feed('whole sentence', 1000) is None
-    d.feed('', 1100)
-    d.feed('whole sentence', 1200)
-    assert d.feed('whole sentence', 1650) == 'whole sentence'
 
 
 def test_disabled_selection_does_not_replay_on_resume():
@@ -221,45 +262,67 @@ def test_disabled_selection_does_not_replay_on_resume():
     assert d.feed('old', 1000, enabled=True) is None
     assert d.feed('old', 2000, enabled=True) is None
     d.feed('new', 2100)
-    assert d.feed('new', 3100) == 'new'
+    assert d.feed('new', 3100) is None
 
 
 def test_focus_return_primes_existing_selection_without_retranslating():
     d = SelectionDebouncer()
     d.feed('selected', 0)
-    assert d.feed('selected', 1000) == 'selected'
+    assert d.feed('selected', 1000) is None
     d.suspend()
     assert d.feed('selected', 1100) is None
     assert d.feed('selected', 1500) is None
     d.feed('new selection', 1600)
-    assert d.feed('new selection', 2600) == 'new selection'
+    assert d.feed('new selection', 2600) is None
 
 
 def test_copy_cancels_pending_selection_until_text_changes():
     d = SelectionDebouncer()
     d.feed('initial', 0)
-    d.feed('copy candidate', 100)
+    d.feed('', 100, dragging=True, point=(0, 0))
+    d.feed('', 150, dragging=True, point=(30, 0))
+    d.feed('copy candidate', 200, point=(30, 0))
     d.cancel_current()
     assert d.feed('copy candidate', 1500) is None
-    d.feed('new selection', 1600)
-    assert d.feed('new selection', 2599) is None
-    assert d.feed('new selection', 2600) == 'new selection'
+    d.feed('', 1600, dragging=True, point=(0, 0))
+    d.feed('', 1650, dragging=True, point=(30, 0))
+    d.feed('new selection', 1700, point=(30, 0))
+    assert d.feed('new selection', 2699) is None
+    assert d.feed('new selection', 2700) == 'new selection'
 
 
-def test_same_text_can_translate_after_a_new_drag_even_after_copy():
+def test_copied_text_is_not_replayed_by_an_unrelated_drag():
     d = SelectionDebouncer()
     d.feed('same', 0)
-    assert d.feed('same', 1000) == 'same'
-    d.feed('', 1100, dragging=True)
-    d.feed('same', 1200)
-    assert d.feed('same', 2200) == 'same'
-    d.feed('', 2300, dragging=True)
-    d.feed('same', 2400)
     d.cancel_current()
-    assert d.feed('same', 3400) is None
-    d.feed('', 3500, dragging=True)
-    d.feed('same', 3600)
-    assert d.feed('same', 4600) == 'same'
+    d.feed('', 100, dragging=True, point=(0, 0))
+    d.feed('', 150, dragging=True, point=(30, 0))
+    d.feed('same', 200, point=(30, 0))
+    assert d.feed('same', 1200) is None
+    d.feed('', 1300, dragging=True, point=(0, 0))
+    d.feed('', 1350, dragging=True, point=(30, 0))
+    d.feed('different', 1400, point=(30, 0))
+    assert d.feed('different', 2400) == 'different'
+
+
+def test_click_and_external_primary_change_do_not_translate():
+    d = SelectionDebouncer()
+    d.feed('old', 0)
+    d.feed('changed without drag', 100)
+    assert d.feed('changed without drag', 1200) is None
+    d.feed('', 1300, dragging=True, point=(10, 10))
+    d.feed('new after click', 1350, point=(10, 10))
+    assert d.feed('new after click', 2400) is None
+
+
+def test_copy_event_blocks_drag_even_if_clipboard_text_is_unchanged():
+    d = SelectionDebouncer()
+    d.feed('old', 0)
+    d.feed('', 100, dragging=True, point=(0, 0))
+    d.feed('', 150, dragging=True, point=(30, 0))
+    d.cancel_current()
+    d.feed('new', 200, point=(30, 0))
+    assert d.feed('new', 1200) is None
 
 
 class MemoryKeyring:

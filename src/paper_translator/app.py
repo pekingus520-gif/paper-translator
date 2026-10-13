@@ -13,7 +13,7 @@ from .config import ConfigStore, atomic_json, config_directory
 from .controller import TranslationController
 from .ipc import LocalCommandServer, send_command, socket_name
 from .zotero import ZoteroBridge
-from .ui import MainWindow, ResultWindow, SettingsDialog
+from .ui import MainWindow, ResultWindow, SettingsDialog, StatusToast
 
 
 def application_icon_path():
@@ -36,7 +36,9 @@ class DesktopApplication:
         self.controller = TranslationController(self.settings)
         self.window = MainWindow()
         self.result_window = ResultWindow()
+        self.status_toast = StatusToast()
         self.window.refresh(self.settings)
+        self.result_window.set_wallpaper(self.settings.wallpaper_path)
         self.result_window.apply_theme(self.settings.color_theme)
         self._apply_opacity(self.settings.window_opacity)
         self.capture_lock = False
@@ -67,6 +69,7 @@ class DesktopApplication:
         self.window.screenshot.connect(self.screenshot)
         self.window.toggle.connect(self.toggle)
         self.window.settings_requested.connect(self.show_settings)
+        self.window.pin_changed.connect(self._pin_main_window)
         self.window.manual.connect(self.manual)
         self.result_window.retry.connect(self.retry)
 
@@ -143,10 +146,20 @@ class DesktopApplication:
         self.window.apply_theme(name)
         self.result_window.apply_theme(name)
 
+    def _apply_wallpaper(self, path):
+        self.window.set_wallpaper(path)
+        self.result_window.set_wallpaper(path)
+
     def _apply_opacity(self, value):
         opacity = max(30, min(100, int(value))) / 100
         self.window.setWindowOpacity(opacity)
         self.result_window.setWindowOpacity(opacity)
+
+    def _pin_main_window(self, enabled):
+        self.settings.main_window_on_top = enabled
+        if self.adapter:
+            self.adapter.configure(self.settings)
+        self._save_preferences()
 
     def command(self, message):
         name = message['command']
@@ -200,8 +213,6 @@ class DesktopApplication:
         self.controller.gate.invalidate()
         self.controller.pending = None
         self.capture_lock = True
-        self.result_window.hide()
-        self.result_window.source.clear()
         if self.wayland:
             # The portal refuses permission dialogs from an unfocused app.
             # Keep a transparent window focused while the shell chooses an area.
@@ -224,8 +235,6 @@ class DesktopApplication:
         self.capture_lock = True
         self.capture_token = None
         self.native_capture_id = capture_id
-        self.result_window.hide()
-        self.result_window.source.clear()
         self.window.showMinimized()
         self.native_capture_timer.start(60000)
 
@@ -323,13 +332,14 @@ class DesktopApplication:
         self.capture.cancel()
         self.capture_lock = False
         self.capture_token = None
-        self.result_window.hide()
         self.window.refresh(self.settings)
         if self.adapter:
             self.adapter.configure(self.settings)
         if self.zotero:
             self.zotero.configure(self.settings)
         self._save_preferences()
+        self.status_toast.show_state(enabled, self.settings.color_theme,
+                                     self.settings.wallpaper_path, self.settings.window_opacity)
 
     def _save_preferences(self):
         values = asdict(self.settings)
@@ -344,9 +354,12 @@ class DesktopApplication:
         dialog = SettingsDialog(self.settings, self.window)
         original_theme = self.settings.color_theme
         original_opacity = self.settings.window_opacity
+        original_wallpaper = self.settings.wallpaper_path
         dialog.theme_changed.connect(self._apply_theme)
+        dialog.wallpaper_changed.connect(self._apply_wallpaper)
         dialog.opacity_changed.connect(self._apply_opacity)
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._apply_wallpaper(original_wallpaper)
             self._apply_theme(original_theme)
             self._apply_opacity(original_opacity)
             return
@@ -354,6 +367,7 @@ class DesktopApplication:
         try:
             warning = self.store.save(settings)
         except (OSError, ValueError) as exc:
+            self._apply_wallpaper(original_wallpaper)
             self._apply_theme(original_theme)
             self._apply_opacity(original_opacity)
             QMessageBox.warning(self.window, '保存失败', str(exc))
@@ -363,12 +377,12 @@ class DesktopApplication:
         self.native_capture_timer.stop()
         self.capture_lock = False
         self.capture_token = None
-        self.result_window.hide()
         self.settings = settings
         if self.zotero:
             self.zotero.configure(settings)
         self.controller.apply_settings(settings)
         self.window.refresh(settings)
+        self.result_window.set_wallpaper(settings.wallpaper_path)
         self.result_window.apply_theme(settings.color_theme)
         self._apply_opacity(settings.window_opacity)
         if self.adapter:
@@ -391,6 +405,7 @@ class DesktopApplication:
         if self.zotero:
             self.zotero.close()
         self.result_window.hide()
+        self.status_toast.hide()
         if self.tray:
             self.tray.hide()
         self.controller.pool.waitForDone()

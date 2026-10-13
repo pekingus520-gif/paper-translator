@@ -11,8 +11,11 @@ if ! command -v glib-compile-schemas >/dev/null; then
 fi
 uuid='paper-translator-bridge@local'
 target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$uuid"
+if gnome-extensions list --enabled 2>/dev/null | grep -Fxq "$uuid"; then
+  gnome-extensions disable "$uuid" || true
+fi
 mkdir -p "$target_dir/schemas"
-cp "$project_dir/gnome-bridge/metadata.json" "$project_dir/gnome-bridge/extension.js" "$project_dir/gnome-bridge/selection.js" "$target_dir/"
+cp "$project_dir/gnome-bridge/metadata.json" "$project_dir/gnome-bridge/extension.js" "$project_dir/gnome-bridge/selection.js" "$project_dir/gnome-bridge/bindings.js" "$project_dir/gnome-bridge/screenshot-session.js" "$target_dir/"
 cp "$project_dir/gnome-bridge/schemas/"*.xml "$target_dir/schemas/"
 glib-compile-schemas --strict "$target_dir/schemas"
 echo "已安装辅助组件：$target_dir"

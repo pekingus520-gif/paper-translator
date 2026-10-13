@@ -34,6 +34,8 @@ def selection_process(connection, parent_pid):
                 debouncer.suspend()
             text = ''
             dragging = bool(user32.GetAsyncKeyState(1) & 0x8000)
+            cursor = wintypes.POINT()
+            point = (cursor.x, cursor.y) if user32.GetCursorPos(ctypes.byref(cursor)) else None
             if enabled and not dragging:
                 try:
                     hwnd = user32.GetForegroundWindow()
@@ -55,7 +57,8 @@ def selection_process(connection, parent_pid):
                             control = control.GetParentControl()
                 except Exception:
                     text = ''
-            selected = debouncer.feed(text, time.monotonic() * 1000, dragging=dragging, enabled=enabled)
+            selected = debouncer.feed(text, time.monotonic() * 1000, dragging=dragging,
+                                      enabled=enabled, point=point)
             current_sequence = user32.GetClipboardSequenceNumber()
             if current_sequence != clipboard_sequence:
                 if debouncer.current and not dragging:
