@@ -15,7 +15,7 @@ if gnome-extensions list --enabled 2>/dev/null | grep -Fxq "$uuid"; then
   gnome-extensions disable "$uuid" || true
 fi
 mkdir -p "$target_dir/schemas"
-cp "$project_dir/gnome-bridge/metadata.json" "$project_dir/gnome-bridge/extension.js" "$project_dir/gnome-bridge/selection.js" "$project_dir/gnome-bridge/bindings.js" "$project_dir/gnome-bridge/screenshot-session.js" "$target_dir/"
+cp "$project_dir/gnome-bridge/metadata.json" "$project_dir/gnome-bridge/extension.js" "$project_dir/gnome-bridge/selection.js" "$project_dir/gnome-bridge/bindings.js" "$project_dir/gnome-bridge/screenshot-session.js" "$project_dir/gnome-bridge/result-presentation.js" "$target_dir/"
 cp "$project_dir/gnome-bridge/schemas/"*.xml "$target_dir/schemas/"
 glib-compile-schemas --strict "$target_dir/schemas"
 echo "已安装辅助组件：$target_dir"

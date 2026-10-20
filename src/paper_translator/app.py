@@ -64,6 +64,7 @@ class DesktopApplication:
         self.controller.result.connect(self.result_window.display)
         self.controller.source_ready.connect(self.result_window.prepare)
         self.controller.error.connect(self.show_error)
+        self.result_window.presented.connect(self._present_result)
         self.controller.status.connect(self.window.statusBar().showMessage)
         self.controller.finished.connect(self._finished)
         self.window.screenshot.connect(self.screenshot)
@@ -141,6 +142,10 @@ class DesktopApplication:
         self.window.showNormal()
         self.window.raise_()
         self.window.activateWindow()
+
+    def _present_result(self):
+        if self.adapter and hasattr(self.adapter, 'present_result'):
+            self.adapter.present_result()
 
     def _apply_theme(self, name):
         self.window.apply_theme(name)

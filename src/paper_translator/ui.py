@@ -797,6 +797,7 @@ class StatusToast(QWidget):
 
 class ResultWindow(QWidget):
     retry = Signal(str)
+    presented = Signal()
 
     def __init__(self):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
@@ -990,6 +991,8 @@ class ResultWindow(QWidget):
             self._near_cursor()
         self.show()
         self.raise_()
+        self.activateWindow()
+        self.presented.emit()
 
     def prepare(self, text):
         # Preserve the previous result while the next translation is pending.
@@ -1009,6 +1012,8 @@ class ResultWindow(QWidget):
             self._near_cursor()
         self.show()
         self.raise_()
+        self.activateWindow()
+        self.presented.emit()
 
     def _near_cursor(self):
         point = QCursor.pos()

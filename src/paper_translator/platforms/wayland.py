@@ -16,6 +16,7 @@ class WaylandAdapter(InputAdapter):
         self.socket_path = socket_path or socket_name()
         self.last_heartbeat = 0
         self.bridge_status = ''
+        self.result_revision = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._publish)
 
@@ -28,12 +29,17 @@ class WaylandAdapter(InputAdapter):
         self.timer.start(2000)
         self._publish()
 
+    def present_result(self):
+        self.result_revision += 1
+        self._publish()
+
     def _publish(self, running=True):
         if not hasattr(self, 'settings'):
             return
         atomic_json(self.bridge_path, {
             'running': running, 'timestamp': time.time(), 'socket': self.socket_path,
             'generation': self.generation,
+            'result_revision': self.result_revision,
             'enabled': self.settings.enabled and self.settings.selection_enabled,
             'translation_enabled': self.settings.enabled,
             'pin_main': self.settings.main_window_on_top,

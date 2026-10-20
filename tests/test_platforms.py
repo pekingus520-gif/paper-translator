@@ -37,6 +37,19 @@ def test_wayland_publishes_only_non_secret_bridge_settings(qapp, tmp_path):
     assert json.loads((tmp_path / 'bridge.json').read_text())['running'] is False
 
 
+def test_wayland_marks_each_new_result_for_shell_presentation(qapp, tmp_path):
+    import json
+    path = tmp_path / 'bridge.json'
+    adapter = WaylandAdapter(path, '/tmp/test.sock')
+    adapter.configure(Settings())
+    assert json.loads(path.read_text())['result_revision'] == 0
+    adapter.present_result()
+    assert json.loads(path.read_text())['result_revision'] == 1
+    adapter.present_result()
+    assert json.loads(path.read_text())['result_revision'] == 2
+    adapter.stop()
+
+
 def test_unresponsive_input_process_can_be_stopped():
     import multiprocessing
     from paper_translator.platforms.process import stop_process

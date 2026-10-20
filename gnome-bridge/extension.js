@@ -10,6 +10,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {SelectionTracker} from './selection.js';
 import {HotkeyBindings} from './bindings.js';
 import {attachScreenshotSignals} from './screenshot-session.js';
+import {shouldPresentResult} from './result-presentation.js';
 
 export default class PaperTranslatorBridge extends Extension {
     enable() {
@@ -17,6 +18,7 @@ export default class PaperTranslatorBridge extends Extension {
         this._config = null;
         this._status = '';
         this._mainPinned = null;
+        this._presentedResult = null;
         this._polling = false;
         this._epoch = 0;
         this._cancellable = new Gio.Cancellable();
@@ -93,6 +95,9 @@ export default class PaperTranslatorBridge extends Extension {
                 this._tracker.suspend();
             }
             this._config = value;
+            if (shouldPresentResult(this._presentedResult, value) && this._presentResult())
+                this._presentedResult = {generation: value.generation,
+                    result_revision: value.result_revision};
             if (this._mainPinned !== Boolean(value.pin_main)) {
                 this._mainPinned = Boolean(value.pin_main);
                 for (const actor of global.get_window_actors())
@@ -115,6 +120,7 @@ export default class PaperTranslatorBridge extends Extension {
     _deactivate() {
         this._config = null;
         this._mainPinned = null;
+        this._presentedResult = null;
         this._epoch++;
         this._tracker.suspend();
         this._hotkeys.clear();
@@ -252,6 +258,21 @@ export default class PaperTranslatorBridge extends Extension {
                 Math.max(area.y, Math.min(y + 16, area.y + area.height - frame.height)));
         } catch (_error) {
             // Positioning is cosmetic; translation still works if a compositor refuses it.
+        }
+    }
+
+    _presentResult() {
+        const window = global.get_window_actors()
+            .map(actor => actor.meta_window)
+            .find(candidate => candidate?.get_title()?.startsWith('Paper Translator · 翻译结果'));
+        if (!window)
+            return false;
+        try {
+            window.make_above();
+            Main.activateWindow(window);
+            return true;
+        } catch (_error) {
+            return false;
         }
     }
 

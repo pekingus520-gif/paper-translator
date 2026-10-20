@@ -743,6 +743,8 @@ def test_result_window_preserves_source_and_displays_review_warning(qapp):
 
 def test_result_stays_visible_until_closed_and_updates_on_next_translation(qapp):
     window = ResultWindow()
+    presented = []
+    window.presented.connect(lambda: presented.append(True))
     window.display(TranslationResult('first', '第一句'))
     assert window.isVisible()
     assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
@@ -752,6 +754,7 @@ def test_result_stays_visible_until_closed_and_updates_on_next_translation(qapp)
     window.display(TranslationResult('second', '第二句'))
     assert window.isVisible()
     assert window.output.toPlainText() == '第二句'
+    assert len(presented) == 2
     window.close()
     assert not window.isVisible()
     window.display(TranslationResult('third', '第三句'))
